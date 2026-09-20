@@ -1,0 +1,54 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ShadowBlip/InputPlumber/main/rootfs/usr/share/inputplumber/schema/composite_device_v1.json
+# ONEXPLAYER 3 (Intel Panther Lake) - custom InputPlumber composite device (oxp-debug 2026-09-06)
+# Based on /usr/share/inputplumber/devices/50-onexplayer_apex.yaml (same MCU generation: xpad 045e:028e + WCH 1a86:fe00).
+# Differences vs apex: DMI match = "ONEXPLAYER 3"; phys paths of this board; the "AT Translated Set 2 keyboard" (i8042) source is
+# intentionally NOT included because event4 is grabbed by ~/oxp3-fix/oxp3-volkey-fix.py (volume-key fix) and its
+# virtual mirror "OXP3 EC keys (volkey fix)" must keep feeding gamescope/Steam/powerbuttond directly.
+# Target: deck-uhid (virtual Steam Deck controller; what steamos-manager forces for OneXPlayer models). Formerly xbox-elite (apex default
+# controller - what steamos-manager configures for its supported OneXPlayer models). keyboard+mouse targets keep the MCU combos.
+# Revert: sudo systemctl disable --now inputplumber; sudo rm /etc/inputplumber/devices.d/50-onexplayer_3.yaml
+version: 1
+kind: CompositeDevice
+name: ONEXPLAYER 3
+single_source: false
+
+matches:
+  - dmi_data:
+      product_name: ONEXPLAYER 3
+      sys_vendor: ONE-NETBOOK
+
+source_devices:
+  # Gamepad (X360 emulation of the controller MCU)
+  - group: gamepad
+    evdev:
+      name: Microsoft X-Box 360 pad
+      handler: event*
+  # MCU keyboard interface (extra keys: Ctrl+Meta+O / Ctrl+Meta+Alt etc.)
+  # NOTE: the MCU exposes TWO evdev nodes with this exact name (input0 keyboard, input1 consumer/mouse).
+  # unique: false makes InputPlumber add both to the SAME composite device instead of spawning a second
+  # composite (which left the real X360 pad unhidden and broke the deck-uhid target on boot/hot-plug).
+  - group: keyboard
+    unique: false
+    evdev:
+      name: "HID 1a86:fe00"
+      handler: event*
+  # MCU vendor interface 2: raw reports for back paddles M1/M2 (0xB2 3F 01 ... [01|02])
+  - group: gamepad
+    hidraw:
+      vendor_id: 0x1a86
+      product_id: 0xfe00
+      interface_num: 2
+  # IMU (BMI160 currently fails to probe on this board: "Error reading chip id" -121; kept for when the kernel/BIOS fix lands)
+  - group: imu
+    iio:
+      name: "{i2c-BMI0160:00,bmi260,bmi160}"
+
+options:
+  auto_manage: true
+
+target_devices:
+  - deck-uhid   # steamos-manager forces deck-uhid on this model anyway; set it here to avoid a transient xbox target on (re)start
+  - mouse
+  - keyboard
+
+capability_map_id: oxp3   # custom map: oxp8 + Home(0x24 native "Keyboard" button) -> Guide (see /etc/inputplumber/capability_maps.d/onexplayer_type3.yaml)

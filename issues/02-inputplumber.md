@@ -1,0 +1,11 @@
+# InputPlumber 0.78: ONEXPLAYER 3 support - Home key (btn 0x24) mapping, QuickAccess2 leaves R1 latched on deck-uhid
+
+**Device:** ONE-NETBOOK ONEXPLAYER 3 (DMI product_name "ONEXPLAYER 3"). xpad 045e:028e (bcdDevice 3.15, single vendor interface) + MCU 1a86:fe00 fw 1.55 (kbd iface 0, mouse iface 1, vendor iface 2 usage page 0xFF00, 64-byte in/out).
+**Working config (attached):** `50-onexplayer_3.yaml` = apex template with DMI match "ONEXPLAYER 3"; sources: xpad evdev + `HID 1a86:fe00` keyboard evdev + hidraw 1a86:fe00 iface 2 (+ iio placeholder); capability map oxp8 -> Console key (Ctrl+Alt+Meta) -> QuickAccess and Keyboard key (Ctrl+Meta+O) -> Keyboard work as intended.
+
+1. **Home key decoded as Keyboard.** The chassis Home key is reported on iface 2 as `B2 3F 01 01 1F 80 24 02 02 05 00 00 [01|02] ...` (btn 0x24, byte12 01=press / 02=release). `drivers::oxp_hid` logs `OXP HID: btn=0x24 PRESSED (type=0x01 flag=0x80 func=0x02)` -> `Gamepad(Button(Keyboard))`. On this model the Keyboard key is the separate Ctrl+Meta+O combo, so 0x24 should be exposed as a distinct/mappable button (workaround: capability map entry `gamepad.button Keyboard -> Guide`, see attached `onexplayer_type3.yaml`).
+2. **Back paddles (M1/M2).** On 7.2.0-valve1 they were silent. On kernel 7.2.4-valve1 the in-kernel hid-oxp driver maps M1/M2 to KEY_F16/KEY_F17 and cycles the MCU report mode at boot; the MCU then emits vendor frames on iface 2 that `drivers::oxp_hid` decodes as Left/RightPaddle1. On the OXP3 the physical left paddle is 0x22 = LeftPaddle1, so the left/right swap inherited from the onexplayer_type8 capability map must not be applied.
+3. **QuickAccess2 on the `deck-uhid` target leaves R1 latched.** Mapping a source to `gamepad.button QuickAccess2` emits a Steam+R1 chord; afterwards the R1 bit stays set in every report (UHID capture baseline `0400...` = R1), so every later Steam press becomes Steam+R1 (screenshot). Restarting IP clears it.
+4. Note for SteamOS users: steamos-manager forces `deck-uhid` for composite devices without a device toml; Steam lists the controller only after an inputplumber restart when IP is enabled mid-session.
+
+Attachments: 50-onexplayer_3.yaml, onexplayer_type3.yaml, hidraw/UHID captures (dis2_capture/, icpt_capture/, qam2_uhid.txt), IP debug log (ip_debug_paddle_full.log).

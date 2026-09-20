@@ -1,0 +1,81 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ShadowBlip/InputPlumber/main/rootfs/usr/share/inputplumber/schema/capability_map_v1.json
+# ONEXPLAYER 3 capability map (oxp-debug 2026-09-06) - copy of /usr/share/inputplumber/capability_maps/onexplayer_type8.yaml (id oxp8)
+# plus one OXP3-specific entry: the chassis "Home" key arrives on the MCU vendor interface as raw frame
+#   B2 3F 01 01 1F 80 24 02 02 05 00 00 [01=press|02=release], which InputPlumber's oxp_hid driver decodes as
+#   Gamepad:Button:Keyboard (on the Steam Deck target that becomes the STEAM+X chord = on-screen keyboard).
+#   The entry below remaps that native button to HOME_TARGET.  (chosen: Guide = Steam menu, closest to "go to Home"; alternatives:
+#   Guide | QuickAccess | QuickAccess2 | Screenshot | Keyboard (keep) - change and restart inputplumber to switch)
+# Install: /etc/inputplumber/capability_maps.d/onexplayer_type3.yaml and set `capability_map_id: oxp3` in
+#          /etc/inputplumber/devices.d/50-onexplayer_3.yaml, then `sudo systemctl restart inputplumber`.
+# Revert:  delete this file and set capability_map_id back to oxp8.
+version: 1
+kind: CapabilityMap
+name: OneXPlayer 3 (Type 8 + Home remap)
+id: oxp3
+mapping:
+  - name: Home key (native btn 0x24 reported as Keyboard)
+    source_events:
+      - gamepad:
+          button: Keyboard
+    target_event:
+      gamepad:
+        button: Guide
+  - name: Left Back Paddle
+    source_events:
+      - gamepad:
+          button: LeftPaddle1
+    target_event:
+      gamepad:
+        button: RightPaddle1
+  - name: Right Back Paddle
+    source_events:
+      - gamepad:
+          button: RightPaddle1
+    target_event:
+      gamepad:
+        button: LeftPaddle1
+  - name: Console key (Ctrl+Alt+Meta) -> Quick Access Menu
+    source_events:
+      - keyboard: KeyLeftCtrl
+      - keyboard: KeyLeftAlt
+      - keyboard: KeyLeftMeta
+    target_event:
+      gamepad:
+        button: QuickAccess
+  - name: Keyboard key (Ctrl+Meta+O) -> on-screen keyboard
+    source_events:
+      - keyboard: KeyLeftCtrl
+      - keyboard: KeyLeftMeta
+      - keyboard: KeyO
+    target_event:
+      gamepad:
+        button: Keyboard
+  - name: Orange Button (Short Press)
+    source_events:
+      - keyboard: KeyLeftMeta
+      - keyboard: KeyG
+    target_event:
+      gamepad:
+        button: Guide
+  - name: Orange Button (Long Press)
+    source_events:
+      - keyboard: KeyLeftMeta
+      - keyboard: KeyD
+    target_event:
+      gamepad:
+        button: QuickAccess2
+  - name: Turbo + Orange Button
+    source_events:
+      - keyboard: KeyLeftMeta
+      - keyboard: KeySysrq
+    target_event:
+      gamepad:
+        button: Screenshot
+  - name: KB + Orange Button
+    source_events:
+      - keyboard: KeyRightCtrl
+      - keyboard: KeyRightAlt
+      - keyboard: KeyDelete
+    target_event:
+      keyboard: KeyF13
+filtered_events: []

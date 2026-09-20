@@ -1,0 +1,20 @@
+[Unit]
+Description=OXP3 volume keys fix (synthesize releases lost by the EC on the i8042 keyboard)
+After=systemd-udevd.service
+Wants=systemd-udevd.service
+# Must grab event4 BEFORE the graphical session (gamescope/Steam) and powerbuttond, otherwise they
+# bind the raw device and ignore the virtual device's volume keys (mid-session hotplug is not wired in).
+Before=display-manager.service sddm.service
+
+[Service]
+Type=simple
+# the installer writes the real path of the script
+ExecStart=/usr/bin/python3 /home/<user>/oxp3-fix/oxp3-volkey-fix.py
+Restart=always
+RestartSec=2
+# needs root: EVIOCGRAB on /dev/input/event* and /dev/uinput
+User=root
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=OXP3 Revert Fix Pack
+Comment=Undo all changes made by the OXP3 fix pack
+Icon=edit-undo
+Terminal=false
+Exec=konsole --hold -e bash -c "$HOME/oxp3-fix/oxp3-apply-fixes.sh --revert"
+Categories=System;

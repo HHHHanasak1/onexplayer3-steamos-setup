@@ -1,0 +1,34 @@
+Sep 06 05:53:53.366884 <host> kernel: Oops: general protection fault, kernel NULL pointer dereference 0xa: 0000 [#1] SMP NOPTI
+Sep 06 05:53:53.366984 <host> kernel: CPU: 5 UID: 0 PID: 536 Comm: kworker/5:2 Tainted: G     U  W           7.2.0-valve1-1-neptune-72-gd39b4282853d #1 PREEMPT(full)  5b1122df523ae9aaddbc0f0b4ca2fa324f9b0576
+Sep 06 05:53:53.367071 <host> kernel: Tainted: [U]=USER, [W]=WARN
+Sep 06 05:53:53.367097 <host> kernel: Hardware name: ONE-NETBOOK ONEXPLAYER 3/ONEXPLAYER 3, BIOS 5.09 08/10/2026
+Sep 06 05:53:53.367117 <host> kernel: Workqueue: events oxp_rgb_queue_fn [hid_oxp]
+Sep 06 05:53:53.367137 <host> kernel: RIP: 0010:oxp_rgb_status_store+0x23/0x120 [hid_oxp]
+Sep 06 05:53:53.367166 <host> kernel: Code: 90 90 90 90 90 90 90 0f 1f 44 00 00 48 83 ec 18 89 d1 65 48 8b 05 d5 33 31 fe 48 89 44 24 10 48 8b 05 21 37 2e 00 48 8b 40 28 <0f> b7 50 0a 81 fa 00 ff 00 00 74 6e b8 ed ff ff ff 81 fa 01 ff 00
+Sep 06 05:53:53.367193 <host> kernel: RSP: 0018:ffffccb6c0833e38 EFLAGS: 00010292
+Sep 06 05:53:53.367219 <host> kernel: RAX: 0000000000000000 RBX: ffff8c1a05603a80 RCX: 0000000000000000
+Sep 06 05:53:53.367252 <host> kernel: RDX: 0000000000000000 RSI: 0000000000000005 RDI: 0000000000000001
+Sep 06 05:53:53.367285 <host> kernel: RBP: ffff8c1a0460d800 R08: 8080808080808080 R09: ffff8c215e370fa0
+Sep 06 05:53:53.367326 <host> kernel: R10: ffff8c1a044afcb8 R11: fefefefefefefeff R12: ffff8c215e370f80
+Sep 06 05:53:53.367346 <host> kernel: R13: ffff8c1a0460d805 R14: 0000000000000000 R15: ffffffffc0e0f240
+Sep 06 05:53:53.367377 <host> kernel: FS:  0000000000000000(0000) GS:ffff8c219f519000(0000) knlGS:0000000000000000
+Sep 06 05:53:53.367399 <host> kernel: CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+Sep 06 05:53:53.367436 <host> kernel: CR2: 00007f388a4db000 CR3: 0000000116cea003 CR4: 0000000108f72ef0
+Sep 06 05:53:53.367455 <host> kernel: PKRU: 55555554
+Sep 06 05:53:53.367483 <host> kernel: Call Trace:
+Sep 06 05:53:53.367511 <host> kernel:  <TASK>
+Sep 06 05:53:53.367539 <host> kernel:  oxp_rgb_queue_fn+0x53/0x90 [hid_oxp 00ed77eb2b280a0a4bacd875a3bb677a08a20b56]
+Sep 06 05:53:53.367561 <host> kernel:  process_one_work+0x19f/0x370
+Sep 06 05:53:53.367580 <host> kernel:  worker_thread+0x1b1/0x310
+Sep 06 05:53:53.367608 <host> kernel:  ? __pfx_worker_thread+0x10/0x10
+Sep 06 05:53:53.367633 <host> kernel:  kthread+0xe4/0x120
+Sep 06 05:53:53.367806 <host> kernel:  ? __pfx_kthread+0x10/0x10
+Sep 06 05:53:53.367828 <host> kernel:  ret_from_fork+0x2a3/0x350
+Sep 06 05:53:53.367846 <host> kernel:  ? __pfx_kthread+0x10/0x10
+Sep 06 05:53:53.367883 <host> kernel:  ? __pfx_kthread+0x10/0x10
+Sep 06 05:53:53.367902 <host> kernel:  ret_from_fork_asm+0x1a/0x30
+Sep 06 05:53:53.367921 <host> kernel:  </TASK>
+Sep 06 05:53:53.367940 <host> kernel: Modules linked in: snd_seq_dummy rfcomm snd_hrtimer snd_seq snd_seq_device nft_fib_inet nft_fib_ipv4 nft_fib_ipv6 nft_fib nft_reject_inet nf_reject_ipv4 nf_reject_ipv6 nft_reject nft_ct nft_chain_nat nf_nat nf_conntrack nf_defrag_ipv6 nf_defrag_ipv4 ccm algif_aead des_generic libdes md4 snd_soc_skl_hda_dsp algif_hash algif_skcipher ramoops snd_soc_intel_sof_board_helpers nf_tables uinput snd_soc_intel_hda_dsp_common snd_sof_probes af_alg reed_solomon bnep snd_hda_codec_intelhdmi snd_hda_codec_hdmi snd_hda_codec_alc269 snd_hda_codec_realtek_lib snd_hda_scodec_component snd_hda_codec_generic snd_soc_dmic mmc_block rpmb_core snd_hda_intel snd_sof_pci_intel_ptl snd_sof_pci_intel_lnl snd_sof_pci_intel_mtl snd_sof_intel_hda_generic soundwire_intel snd_sof_intel_hda_sdw_bpt snd_sof_intel_hda_common snd_soc_hdac_hda snd_sof_intel_hda_mlink snd_sof_intel_hda soundwire_cadence snd_sof_pci snd_sof_xtensa_dsp snd_sof intel_rapl_msr snd_sof_utils intel_uncore_frequency snd_hda_ext_core intel_uncore_frequency_common
+Sep 06 05:53:53.368065 <host> kernel:  snd_hda_codec snd_hda_core snd_intel_dspcfg snd_intel_sdw_acpi snd_soc_acpi_intel_match snd_soc_acpi_intel_sdca_quirks x86_pkg_temp_thermal soundwire_generic_allocation intel_powerclamp snd_soc_sdw_utils coretemp snd_soc_acpi iwlmld snd_hwdep mousedev kvm_intel soundwire_bus mac80211 xe snd_soc_sdca kvm ptp snd_soc_core pps_core libarc4 spi_pxa2xx_platform snd_compress drm_gpusvm_helper hid_multitouch irqbypass dw_dmac ac97_bus drm_gpuvm aesni_intel rtsx_pci_sdmmc spi_pxa2xx_core 8250_dw drm_buddy gf128mul btintel_pcie snd_pcm_dmaengine mmc_core iwlwifi aead joydev gpu_sched snd_pcm btintel iTCO_wdt spi_nor intel_cstate drm_suballoc_helper mei_gsc_proxy intel_pmc_bxt wmi_bmof snd_timer hid_oxp xpad intel_uncore pcspkr mtd drm_ttm_helper rtsx_pci cfg80211 bluetooth intel_lpss_pci i2c_i801 snd intel_pmc_core ttm processor_thermal_device_pci mei_me soundcore processor_thermal_device i2c_smbus intel_lpss i2c_mux drm_exec mei crc8 bmi160_i2c processor_thermal_wt_hint bmi160_core i2c_algo_bit idma64 rfkill
+Sep 06 05:53:53.368140 <host> kernel:  platform_temperature_control industrialio_triggered_buffer drm_display_helper int3403_thermal processor_thermal_soc_slider kfifo_buf processor_thermal_rfim pmt_telemetry cec i2c_hid_acpi i2c_hid industrialio processor_thermal_rapl video pmt_discovery tpm_crb intel_rapl_common acpi_tad pmt_class int3400_thermal tpm_tis processor_thermal_wt_req acpi_thermal_rel processor_thermal_power_floor tpm_tis_core intel_pmc_ssram_telemetry acpi_pad processor_thermal_mbox intel_pmc_pwrm_telemetry pinctrl_intel_platform intel_vpu thunderbolt wmi int340x_thermal_zone intel_vsec mac_hid dm_mod hid_nintendo hid_playstation ntsync i2c_dev ff_memless led_class_multicolor pkcs8_key_parser crypto_user zram 842_decompress 842_compress lz4hc_compress tpm libaescfb overlay vfat fat nvme nvme_core serio_raw spi_intel_pci nvme_keyring nvme_auth spi_intel
+Sep 06 05:53:53.368198 <host> kernel: ---[ end trace 0000000000000000 ]---

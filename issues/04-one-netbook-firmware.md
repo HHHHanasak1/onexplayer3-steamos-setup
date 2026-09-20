@@ -1,0 +1,6 @@
+# ONEXPLAYER 3 (BIOS 5.09 / EC / MCU 1a86:fe00 fw 1.55) - firmware findings for One-Netbook
+
+1. **Volume keys drop key-release scancodes.** The volume buttons are delivered through the EC's i8042 keyboard ("AT Translated Set 2 keyboard"). With quick presses the break code is lost for most presses (10 rapid presses -> ~7 arrive as repeats with no release; even slow presses lose ~40% of releases), so the OS sees a held key and keeps changing the volume. Linux workaround: a userspace evdev proxy that synthesises releases.
+2. **RGB rings ignore host commands.** Both the Linux kernel hid-oxp driver and the HHD/HueSync OneXPlayer v1/v2 protocols (X1-Mini / OneXFly frames on the 0xFF00 vendor interface) are accepted (64-byte writes succeed) but the lighting never changes; only the firmware preset effect runs.
+3. NVMe Predator GM7 (Biwin/Maxio 1dee:1602, fw BM345CVN) fails to resume from s2idle through the ACPI StorageD3Enable path (`Disabling device after reset failure: -19`); Linux works with `nvme.noacpi=1`. A BIOS option or SSD firmware fix would help other OSes too.
+4. Gyro: the IMU is a BMI260 (chip id 0x27 at I2C 0x68) exposed under the ACPI id 10EC5280, which makes the kernel pick the wrong driver. Reporting the standard id BMI0260 in the DSDT would fix detection on every OS.
