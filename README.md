@@ -4,6 +4,7 @@ This repository covers everything needed to run SteamOS on the ONEXPLAYER 3, fro
 
 1. **Part 1** is a step-by-step guide to installing SteamOS with the recovery image.
 2. **Part 2** is a fix pack, one script that repairs what does not work out of the box: Wi-Fi, suspend/resume, the HDR panel and refresh rates, volume keys, the chassis keys and back paddles.
+3. **Part 3** covers the lighting: a fork of the HueSync Decky plugin that controls the joystick rings, the Xbox button light and the slogan light.
 
 ## Part 1 - Installing SteamOS
 
@@ -86,7 +87,7 @@ cp OXP3-*.desktop ~/Desktop/ && chmod +x ~/Desktop/OXP3-*.desktop   # optional d
 Flags: `--yes`, `--force`, `--force-nvme`, `--no-wifi`.
 
 - SteamOS updates may make the root filesystem read-only again, reset `/etc` and remove installed packages. Re-run the script afterwards; it is idempotent. If the filesystem is read-only, the script runs `steamos-readonly disable` first.
-- On a machine without working Wi-Fi, connect USB Ethernet or USB tethering before running the script, so can download `linux-firmware`. Without any network the step is skipped with a message and the other fixes still run. A reboot is needed afterwards so the driver loads the new firmware.
+- On a machine without working Wi-Fi, connect USB Ethernet or USB tethering before running the script, so step 0 can download `linux-firmware`. Without any network the step is skipped with a message and the other fixes still run. A reboot is needed afterwards so the driver loads the new firmware.
 - Remove earlier hacks of your own first, such as boot-time `chvt` scripts or a masked `powerbuttond`, because they can interfere.
 - Do not unbind or rebind hid-oxp, and do not write raw commands to the `1a86:fe00` hidraw device.
 - After enabling InputPlumber mid-session, the controller page in Steam may need `sudo systemctl restart inputplumber` or a Steam restart before it shows the controller.
@@ -99,7 +100,7 @@ Flags: `--yes`, `--force`, `--force-nvme`, `--no-wifi`.
 - **Volume key root cause** is in the embedded controller firmware. A firmware update from the vendor would remove the need for the forwarder.
 - **HDR uses the gamma-2.2 path.** A true PQ path (`xe.enable_dpcd_backlight=1`) has not been tested.
 - **Intermittent boot without speaker output.** Not investigated yet.
-- **Lighting is not part of this pack.** The kernel hid-oxp LED interface has no effect on the OXP3 MCU. Never unbind or rebind hid-oxp: it triggers a kernel Oops (`issues/hid_oxp_oops_rebind.txt`).
+- **Lighting is not part of this pack.** The kernel hid-oxp LED interface has no effect on the OXP3 MCU, so lighting is handled by a plugin, see Part 3. Never unbind or rebind hid-oxp: it triggers a kernel Oops (`issues/hid_oxp_oops_rebind.txt`).
 
 Upstream bug drafts are in `issues/`.
 
@@ -116,3 +117,37 @@ Suspend/resume failures were reproduced 7 out of 7 times with `rtcwake`-timed su
 - **v1.2.0 (2026-09-12)**: back paddles work through the hid-oxp driver, and the left/right swap inherited from the OneXPlayer 8 map is removed. `--check` and apply report and re-assert the paddle driver state through sysfs.
 - **v1.1.0 (2026-09-10)**: the gamescope HDR lua ships the missing 30-144 Hz `dynamic_modegen`. v1.0.1 only declared `dynamic_refresh_rates = {60, 144}` without the matching mode-generation function, so gamescope could never produce those modes. The timing formula comes from the two real hardware modes (60 Hz and 144 Hz from `modetest -c`) and covers the whole range.
 - **v1.0 (2026-09-06)**: initial release.
+
+## Part 3 - Lighting
+
+The fix pack does not touch lighting. The kernel driver's LED interface has no effect on the ONEXPLAYER 3 controller, so the lights are driven by a fork of the [HueSync](https://github.com/honjow/HueSync) Decky plugin with ONEXPLAYER 3 support: https://github.com/PPPPatrick0/HueSync, branch `oxp3-three-zones`. It is based on upstream HueSync 3.9.0 and keeps its BSD 3-Clause license.
+
+The fork adds three zones that can be set independently: the two joystick rings, the Xbox button light and the slogan light. It talks to the controller over its vendor hidraw interface (`1a86:fe00`) and skips the button-table initialization that the ONEXPLAYER X1 mini mapping normally sends, because that frame overwrites the key table on this controller.
+
+The lighting plugin and the fix pack are independent of each other, so install them in either order. There is no prebuilt release yet, so the plugin is built from source. You need Node.js and pnpm on a PC, and Decky Loader on the deck.
+
+**Build**
+
+```bash
+git clone -b oxp3-three-zones https://github.com/PPPPatrick0/HueSync.git
+cd HueSync
+pnpm install
+pnpm run build
+```
+
+**Install on the deck**
+
+```bash
+# on the PC, inside the HueSync folder
+tar czf huesync.tgz dist py_modules main.py package.json plugin.json LICENSE
+scp huesync.tgz deck@<deck-ip>:/tmp/
+
+# on the deck
+sudo mkdir -p ~/homebrew/plugins/HueSync
+sudo tar xzf /tmp/huesync.tgz -C ~/homebrew/plugins/HueSync --no-same-owner
+sudo systemctl restart plugin_loader
+```
+
+If HueSync is already installed from the Decky store, this replaces it. Restarting Decky reloads the plugin; the lighting controls then appear in the plugin's panel in the quick access menu.
+
+**Do not use the plugin's built-in update.** It downloads the upstream release, which has no ONEXPLAYER 3 support and would replace the fork. To update the fork, pull the branch, rebuild and repeat the install steps.
