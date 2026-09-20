@@ -99,10 +99,9 @@ The fix pack does not touch lighting: the kernel hid-oxp LED interface has no ef
 
 ### Known issues and limitations
 
-As of 2026-09-20 these fixes have been in daily use for about half a month. Only two things are known not to work, the gyroscope and XeSS multi frame generation, and no other stability problems have been seen apart from the rare speaker case below.
+As of 2026-09-20 these fixes have been in daily use for about half a month. Only the gyroscope is known not to work, and no other stability problems have been seen apart from the rare speaker case below.
 
 - **Gyroscope: recognized, but severe drift.** The sensor is a Bosch BMI260 that the kernel does not identify on its own. An ACPI table override makes it probe and deliver data, and with corrected units, axis order and mount matrix the direction is right. Flat-steering use still drifts by several degrees per minute, because the temperature-dependent bias about the vertical axis cannot be corrected with gravity. Static compensation, automatic calibration and no compensation were all tried without a usable result. This pack does not enable the gyroscope. See `issues/03-bmi160.md`.
-- **XeSS multi frame generation does not work.** 2x frame generation works, 3x and 4x never engage. As far as we know, XeSS on Linux currently cannot use the XMX units of the GPU and falls back to the DP4a path. Nothing in this pack changes that.
 - **Volume key root cause** is in the embedded controller firmware. A firmware update from the vendor would remove the need for the forwarder.
 - **HDR uses the gamma-2.2 path.** A true PQ path (`xe.enable_dpcd_backlight=1`) has not been tested.
 - **Speakers are very occasionally silent after boot.** A reboot fixes it. Not investigated yet.
