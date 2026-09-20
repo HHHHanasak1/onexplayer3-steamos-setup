@@ -87,7 +87,7 @@ cp OXP3-*.desktop ~/Desktop/ && chmod +x ~/Desktop/OXP3-*.desktop   # optional d
 Flags: `--yes`, `--force`, `--force-nvme`, `--no-wifi`.
 
 - SteamOS updates may make the root filesystem read-only again, reset `/etc` and remove installed packages. Re-run the script afterwards; it is idempotent. If the filesystem is read-only, the script runs `steamos-readonly disable` first.
-- On a machine without working Wi-Fi, connect USB Ethernet or USB tethering before running the script, so step 0 can download `linux-firmware`. Without any network the step is skipped with a message and the other fixes still run. A reboot is needed afterwards so the driver loads the new firmware.
+- On a machine without working Wi-Fi, connect USB Ethernet or USB tethering before running the script, so the script can download `linux-firmware`. Without any network the step is skipped with a message and the other fixes still run. A reboot is needed afterwards so the driver loads the new firmware.
 - Remove earlier hacks of your own first, such as boot-time `chvt` scripts or a masked `powerbuttond`, because they can interfere.
 - Do not unbind or rebind hid-oxp, and do not write raw commands to the `1a86:fe00` hidraw device.
 - After enabling InputPlumber mid-session, the controller page in Steam may need `sudo systemctl restart inputplumber` or a Steam restart before it shows the controller.
@@ -124,9 +124,21 @@ The fix pack does not touch lighting. The kernel driver's LED interface has no e
 
 The fork adds three zones that can be set independently: the two joystick rings, the Xbox button light and the slogan light. It talks to the controller over its vendor hidraw interface (`1a86:fe00`) and skips the button-table initialization that the ONEXPLAYER X1 mini mapping normally sends, because that frame overwrites the key table on this controller.
 
-The lighting plugin and the fix pack are independent of each other, so install them in either order. There is no prebuilt release yet, so the plugin is built from source. You need Node.js and pnpm on a PC, and Decky Loader on the deck.
+The lighting plugin and the fix pack are independent of each other, so install them in either order. Decky Loader is required.
 
-**Build**
+**Install from the release**
+
+```bash
+curl -L -o /tmp/huesync-oxp3.zip https://github.com/PPPPatrick0/HueSync/releases/download/v3.9.0-oxp3.1/huesync-oxp3.zip
+sudo unzip -o /tmp/huesync-oxp3.zip -d ~/homebrew/plugins
+sudo systemctl restart plugin_loader
+```
+
+Run these on the deck, in Desktop Mode or over SSH. This replaces an existing HueSync installation. Restarting Decky reloads the plugin; the lighting controls then appear in the plugin's panel in the quick access menu.
+
+**Or build from source**
+
+You need Node.js and pnpm on a PC.
 
 ```bash
 git clone -b oxp3-three-zones https://github.com/PPPPatrick0/HueSync.git
@@ -135,19 +147,6 @@ pnpm install
 pnpm run build
 ```
 
-**Install on the deck**
+The source tree links two third-party packages (`hid` and `serial`) as git submodules, so a plain copy of the built folder is not complete. The release zip already contains them, so building from source is only useful for changing the code.
 
-```bash
-# on the PC, inside the HueSync folder
-tar czf huesync.tgz dist py_modules main.py package.json plugin.json LICENSE
-scp huesync.tgz deck@<deck-ip>:/tmp/
-
-# on the deck
-sudo mkdir -p ~/homebrew/plugins/HueSync
-sudo tar xzf /tmp/huesync.tgz -C ~/homebrew/plugins/HueSync --no-same-owner
-sudo systemctl restart plugin_loader
-```
-
-If HueSync is already installed from the Decky store, this replaces it. Restarting Decky reloads the plugin; the lighting controls then appear in the plugin's panel in the quick access menu.
-
-**Do not use the plugin's built-in update.** It downloads the upstream release, which has no ONEXPLAYER 3 support and would replace the fork. To update the fork, pull the branch, rebuild and repeat the install steps.
+**Do not use the plugin's built-in update.** It downloads the upstream release, which has no ONEXPLAYER 3 support and would replace the fork. To update, install a newer release from https://github.com/PPPPatrick0/HueSync/releases.
