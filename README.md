@@ -93,13 +93,17 @@ Flags: `--yes`, `--force`, `--force-nvme`, `--no-wifi`.
 - The volume key fix grabs the i8042 keyboard exclusively and forwards every key, including power, through a virtual device. Keep that in mind if you attach an external PS/2 keyboard.
 - Everything is written under `/etc` and `/home`, and `--revert` undoes it.
 
+### Lighting
+
+The fix pack does not touch lighting: the kernel hid-oxp LED interface has no effect on the ONEXPLAYER 3 controller. For lighting control use the [modified fork of HueSync](https://github.com/PPPPatrick0/HueSync/tree/oxp3), a Decky plugin that adds three independently controlled zones: the joystick rings, the Xbox button light and the slogan light. Its README explains how to install it. It is independent of the fix pack, so the two can be installed in either order.
+
 ### Known issues and limitations
 
 - **Gyroscope: recognized, but severe drift.** The sensor is a Bosch BMI260 that the kernel does not identify on its own. An ACPI table override makes it probe and deliver data, and with corrected units, axis order and mount matrix the direction is right. Flat-steering use still drifts by several degrees per minute, because the temperature-dependent bias about the vertical axis cannot be corrected with gravity. Static compensation, automatic calibration and no compensation were all tried without a usable result. This pack does not enable the gyroscope. See `issues/03-bmi160.md`.
 - **Volume key root cause** is in the embedded controller firmware. A firmware update from the vendor would remove the need for the forwarder.
 - **HDR uses the gamma-2.2 path.** A true PQ path (`xe.enable_dpcd_backlight=1`) has not been tested.
 - **Intermittent boot without speaker output.** Not investigated yet.
-- **Lighting is not part of this pack.** The kernel hid-oxp LED interface has no effect on the OXP3 MCU. If you want lighting control, use the [modified fork of HueSync](https://github.com/PPPPatrick0/HueSync/tree/oxp3-three-zones), whose README explains how to install it. Never unbind or rebind hid-oxp: it triggers a kernel Oops (`issues/hid_oxp_oops_rebind.txt`).
+- **Lighting is not part of this pack**, see the Lighting section above. Never unbind or rebind hid-oxp: it triggers a kernel Oops (`issues/hid_oxp_oops_rebind.txt`).
 
 Upstream bug drafts are in `issues/`.
 
