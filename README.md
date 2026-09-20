@@ -113,7 +113,6 @@ Suspend/resume failures were reproduced 7 out of 7 times with `rtcwake`-timed su
 
 ### Changelog
 
-- **v1.3.0 (2026-09-20)**: new step 0 at the start of the script fixes Wi-Fi on a fresh install: it unlocks the root filesystem, initializes the pacman keyring and installs `linux-firmware`. `--check` reports the package and keyring state, and `--no-wifi` skips the step.
 - **v1.2.0 (2026-09-12)**: back paddles work through the hid-oxp driver, and the left/right swap inherited from the OneXPlayer 8 map is removed. `--check` and apply report and re-assert the paddle driver state through sysfs.
 - **v1.1.0 (2026-09-10)**: the gamescope HDR lua ships the missing 30-144 Hz `dynamic_modegen`. v1.0.1 only declared `dynamic_refresh_rates = {60, 144}` without the matching mode-generation function, so gamescope could never produce those modes. The timing formula comes from the two real hardware modes (60 Hz and 144 Hz from `modetest -c`) and covers the whole range.
 - **v1.0 (2026-09-06)**: initial release.
