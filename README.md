@@ -4,7 +4,6 @@ This repository covers everything needed to run SteamOS on the ONEXPLAYER 3, fro
 
 1. **Part 1** is a step-by-step guide to installing SteamOS with the recovery image.
 2. **Part 2** is a fix pack, one script that repairs what does not work out of the box: Wi-Fi, suspend/resume, the HDR panel and refresh rates, volume keys, the chassis keys and back paddles.
-3. **Part 3** covers the lighting: a fork of the HueSync Decky plugin that controls the joystick rings, the Xbox button light and the slogan light.
 
 ## Part 1 - Installing SteamOS
 
@@ -100,7 +99,7 @@ Flags: `--yes`, `--force`, `--force-nvme`, `--no-wifi`.
 - **Volume key root cause** is in the embedded controller firmware. A firmware update from the vendor would remove the need for the forwarder.
 - **HDR uses the gamma-2.2 path.** A true PQ path (`xe.enable_dpcd_backlight=1`) has not been tested.
 - **Intermittent boot without speaker output.** Not investigated yet.
-- **Lighting is not part of this pack.** The kernel hid-oxp LED interface has no effect on the OXP3 MCU, so lighting is handled by a plugin, see Part 3. Never unbind or rebind hid-oxp: it triggers a kernel Oops (`issues/hid_oxp_oops_rebind.txt`).
+- **Lighting is not part of this pack.** The kernel hid-oxp LED interface has no effect on the OXP3 MCU. If you want lighting control, use the [modified fork of HueSync](https://github.com/PPPPatrick0/HueSync/tree/oxp3-three-zones), whose README explains how to install it. Never unbind or rebind hid-oxp: it triggers a kernel Oops (`issues/hid_oxp_oops_rebind.txt`).
 
 Upstream bug drafts are in `issues/`.
 
@@ -117,36 +116,3 @@ Suspend/resume failures were reproduced 7 out of 7 times with `rtcwake`-timed su
 - **v1.2.0 (2026-09-12)**: back paddles work through the hid-oxp driver, and the left/right swap inherited from the OneXPlayer 8 map is removed. `--check` and apply report and re-assert the paddle driver state through sysfs.
 - **v1.1.0 (2026-09-10)**: the gamescope HDR lua ships the missing 30-144 Hz `dynamic_modegen`. v1.0.1 only declared `dynamic_refresh_rates = {60, 144}` without the matching mode-generation function, so gamescope could never produce those modes. The timing formula comes from the two real hardware modes (60 Hz and 144 Hz from `modetest -c`) and covers the whole range.
 - **v1.0 (2026-09-06)**: initial release.
-
-## Part 3 - Lighting
-
-The fix pack does not touch lighting. The kernel driver's LED interface has no effect on the ONEXPLAYER 3 controller, so the lights are driven by a fork of the [HueSync](https://github.com/honjow/HueSync) Decky plugin with ONEXPLAYER 3 support: https://github.com/PPPPatrick0/HueSync, branch `oxp3-three-zones`. It is based on upstream HueSync 3.9.0 and keeps its BSD 3-Clause license.
-
-The fork adds three zones that can be set independently: the two joystick rings, the Xbox button light and the slogan light. It talks to the controller over its vendor hidraw interface (`1a86:fe00`) and skips the button-table initialization that the ONEXPLAYER X1 mini mapping normally sends, because that frame overwrites the key table on this controller.
-
-The lighting plugin and the fix pack are independent of each other, so install them in either order. Decky Loader is required.
-
-**Install from the release**
-
-```bash
-curl -L -o /tmp/huesync-oxp3.zip https://github.com/PPPPatrick0/HueSync/releases/download/v3.9.0-oxp3.1/huesync-oxp3.zip
-sudo unzip -o /tmp/huesync-oxp3.zip -d ~/homebrew/plugins
-sudo systemctl restart plugin_loader
-```
-
-Run these on the deck, in Desktop Mode or over SSH. This replaces an existing HueSync installation. Restarting Decky reloads the plugin; the lighting controls then appear in the plugin's panel in the quick access menu.
-
-**Or build from source**
-
-You need Node.js and pnpm on a PC.
-
-```bash
-git clone -b oxp3-three-zones https://github.com/PPPPatrick0/HueSync.git
-cd HueSync
-pnpm install
-pnpm run build
-```
-
-The source tree links two third-party packages (`hid` and `serial`) as git submodules, so a plain copy of the built folder is not complete. The release zip already contains them, so building from source is only useful for changing the code.
-
-**Do not use the plugin's built-in update.** It downloads the upstream release, which has no ONEXPLAYER 3 support and would replace the fork. To update, install a newer release from https://github.com/PPPPatrick0/HueSync/releases.
