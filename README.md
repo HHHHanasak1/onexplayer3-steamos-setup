@@ -58,11 +58,6 @@ This is the recovery-image method that works on this machine. You need a Windows
 15. Wait for the system update to complete, then reboot. The first boot takes a while.
 16. You should hear the familiar Steam startup chime. Connect an external monitor and you will enter the system.
 
-**Known problems right after this installation**
-
-- **Gamescope:** after restarting or waking from sleep, the internal screen stays black. Plug in an external monitor and quickly unplug it to wake the internal display.
-- **Wi-Fi:** the built-in Wi-Fi does not work.
-
 The fix pack in Part 2 targets both: the panel and suspend fixes address the black internal screen, and step 0 gets Wi-Fi working (it needs the USB tethering or Ethernet connection from step 13 to download the firmware).
 
 ## Part 2 - The fix pack
