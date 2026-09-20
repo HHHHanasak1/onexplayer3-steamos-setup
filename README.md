@@ -5,8 +5,6 @@ This repository covers everything needed to run SteamOS on the ONEXPLAYER 3, fro
 1. **Part 1** is a step-by-step guide to installing SteamOS with the recovery image.
 2. **Part 2** is a fix pack, one script that repairs what does not work out of the box: Wi-Fi, suspend/resume, the HDR panel and refresh rates, volume keys, the chassis keys and back paddles.
 
-Fix pack version v1.3.0 (2026-09-20) | MIT | Author: HANA & Claude
-
 ## Part 1 - Installing SteamOS
 
 This is the recovery-image method that works on this machine. You need a Windows PC with Rufus, a USB drive, and later a temporary network connection such as USB tethering from a phone.
