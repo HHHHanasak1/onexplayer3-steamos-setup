@@ -71,6 +71,7 @@ This is the recovery-image method that works on this machine. You need a Windows
 | Per-frame `xe ... DSB 0 poll error` kernel message flood | The xe display state buffer fails on this panel | `options xe enable_dsb=0` in `/etc/modprobe.d/xe-oxp3.conf`. Cosmetic, only silences the messages |
 | **Volume keys stick** when pressed quickly | The embedded controller drops the key-release scancodes on the i8042 keyboard, so the kernel sees the key held down | `oxp3-volkey-fix.service`, a boot-time evdev forwarder that grabs the raw device and re-emits each volume key as a press plus release on a virtual keyboard without autorepeat |
 | **Home, Console and Keyboard keys do nothing** | These keys are reported through the MCU keyboard and vendor interfaces | An InputPlumber composite device plus capability map: Home to Steam menu, Console to Quick Access, Keyboard to the on-screen keyboard |
+| **Battery shows 101-104 %** after a full charge (Steam UI and performance overlay) | The gauge reports `energy_now` above its own `energy_full` (92.2 vs 89.9 Wh, design 84.5 Wh). The ACPI battery driver only clamps when `energy_full` is below the design value, so `capacity` becomes 103; upower clamps, but Steam reads the sysfs value through its bundled SDL3 and the overlay divides `energy_now` by `energy_full` itself | `oxp3-battery-clamp.service`, a root service that bind-mounts corrected `capacity` and `energy_full` files over the two sysfs attributes (`energy_full` = the larger of the kernel value and the highest `energy_now` seen), refreshed once a minute. Nothing else is touched; `--revert` unmounts and removes it |
 | **Back paddles M1 and M2 do not work** | They need the hid-oxp driver to map them and switch the MCU report mode | hid-oxp maps M1 and M2 to `KEY_F16` and `KEY_F17` and cycles the report mode at boot. The MCU then emits vendor frames that InputPlumber decodes as the left and right paddle. On the OXP3 the physical left paddle is `0x22`, so the left/right swap inherited from the OneXPlayer 8 map was removed. The script only re-asserts the driver state through sysfs |
 
 ### Installing and running the fix pack
@@ -119,6 +120,9 @@ Suspend/resume failures were reproduced 7 out of 7 times with `rtcwake`-timed su
 
 ### Changelog
 
+- **v1.4.0 (2026-09-22)**: battery percentage clamp (step 6). The gauge over-reports right after a full charge and Steam showed 101-104 %; a small root service overlays corrected `capacity` / `energy_full` sysfs values, refreshed once a minute.
+- **v1.3.1 (2026-09-22)**: the Wi-Fi/Bluetooth step really installs the BE201 firmware: SteamOS' own `linux-firmware-neptune` satisfies the package check but lacks the files, so the step now looks at the driver state and extracts only the missing families from `linux-firmware-intel`.
+- **v1.3.0 (2026-09-20)**: step 0, Wi-Fi firmware on a fresh install (`--no-wifi` skips it).
 - **v1.2.0 (2026-09-12)**: back paddles work through the hid-oxp driver, and the left/right swap inherited from the OneXPlayer 8 map is removed. `--check` and apply report and re-assert the paddle driver state through sysfs.
 - **v1.1.0 (2026-09-10)**: the gamescope HDR lua ships the missing 30-144 Hz `dynamic_modegen`. v1.0.1 only declared `dynamic_refresh_rates = {60, 144}` without the matching mode-generation function, so gamescope could never produce those modes. The timing formula comes from the two real hardware modes (60 Hz and 144 Hz from `modetest -c`) and covers the whole range.
 - **v1.0 (2026-09-06)**: initial release.

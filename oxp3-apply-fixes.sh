@@ -1,12 +1,16 @@
 #!/bin/bash
 # oxp3-steamos-fixes - ONEXPLAYER 3 (Intel Panther Lake) SteamOS fix pack
-# Version: v1.3.0 (2026-09-20)     License: MIT (see LICENSE)     Author: HANA & Claude
+# Version: v1.4.0 (2026-09-22)     License: MIT (see LICENSE)     Author: HANA & Claude
 # Tested on: SteamOS 3.10 main build 20260827.1000, kernel 7.2.0-valve1-1-neptune-72, OXP3 BIOS 5.09,
 #            panel Samsung SDC AMS881KB01-0, SSD Predator GM7 1TB (Biwin/Maxio 1dee:1602)
 # v1.1.0: gamescope HDR lua now also registers real 30-144Hz dynamic_modegen (this panel has genuine
 #         continuous VRR; the v1.0.1 lua declared dynamic_refresh_rates but never shipped the
 #         matching dynamic_modegen function, so no extra Hz options ever actually appeared in the
 #         Steam Performance panel's per-game refresh-rate selector).
+# v1.4.0: new step 6, battery percentage clamp. After a full charge the gauge reports energy_now above its own
+#         energy_full (92.2 vs 89.9 Wh), the ACPI battery driver then reports capacity 103 and Steam (through its bundled
+#         SDL3) and the performance overlay (energy_now/energy_full) show 101-104 %. A small root service bind-mounts
+#         corrected "capacity" and "energy_full" files over the sysfs attributes (refreshed once a minute).
 # v1.3.1: step 0 fixed. SteamOS ships its own linux-firmware-neptune package, which satisfies "linux-firmware" for
 #         pacman but lacks the BE201 (Wi-Fi 7, CNVi 8086:e440) files iwlwifi-sc-a0-fm-c0-c10x and the matching Bluetooth
 #         intel/ibt-00a0-0291-*, so the old "already installed" test skipped the fix and every OS update brings the
@@ -25,13 +29,13 @@
 #         the hid-oxp sysfs (driver pages 1-2 only, never raw hidraw); new --mcu-restore (DANGEROUS, explicit, confirmed)
 #         rewrites MCU button-table page 3 (Home 0x24 + factory-default 0x21/0x25-0x2B) to recover a Home/Xbox
 #         key that went silent after a foreign tool overwrote the MCU table.
-OXP3_FIXES_VERSION="v1.3.1 (2026-09-22)"
+OXP3_FIXES_VERSION="v1.4.0 (2026-09-22)"
 TESTED_STEAMOS_BUILD="20260827.1000"
 TESTED_KERNEL_PREFIX="7.2.0-valve1"
 # ============================================================================
 # ONEXPLAYER 3 fix re-applier  (SteamOS 3.10, Intel Panther Lake, xe)
 # Purpose:
-#   SteamOS updates may overwrite /etc changes. This script re-applies all five fixes (idempotent),
+#   SteamOS updates may overwrite /etc changes. This script re-applies all six fixes (idempotent),
 #   preceded by step 0 which gets Wi-Fi working on a fresh install:
 #     0) Wi-Fi firmware - unlock the root filesystem, initialize the pacman keyring, install linux-firmware (--no-wifi skips)
 #     1) kernel param nvme.noacpi=1 (only for the Predator GM7 / 1dee:1602 SSD) - NVMe not resuming from s2idle
@@ -42,10 +46,12 @@ TESTED_KERNEL_PREFIX="7.2.0-valve1"
 #     4) volume-key fix service - the EC drops key releases; an evdev proxy synthesises them
 #     5) InputPlumber composite device + capability map - Home/Console/Keyboard keys, back paddles as L4/R4, single virtual gamepad
 #        (paddles rely on the in-kernel hid-oxp driver; this script only re-asserts its sysfs state, it never writes the MCU directly)
+#     6) battery percentage clamp service - the gauge over-reports right after a full charge (103 %); a root service
+#        overlays corrected capacity / energy_full sysfs values so Steam and the performance overlay stay at <= 100 %
 # Usage:
 #   ./oxp3-apply-fixes.sh                apply (asks sudo password, prints the plan and confirms)
-#   ./oxp3-apply-fixes.sh --check        check only, changes nothing, needs no sudo (covers all five fixes)
-#   ./oxp3-apply-fixes.sh --revert       undo all five fixes (then reboot)
+#   ./oxp3-apply-fixes.sh --check        check only, changes nothing, needs no sudo (covers all six fixes)
+#   ./oxp3-apply-fixes.sh --revert       undo all six fixes (then reboot)
 #   ./oxp3-apply-fixes.sh --mcu-restore  [DANGEROUS] raw-writes MCU button-table page 3 (Home/Xbox) to factory values, asks to confirm.
 #                                        Use ONLY if Home/Xbox are already dead. A wrong write can kill chassis keys for good and
 #                                        cannot be read back or verified. Normal users must NOT run this. No other option writes the MCU.
@@ -85,6 +91,8 @@ LUA_NOHDR_BAK="$USER_HOME/oxp3-nohdr.lua.disabled"
 EFI_GRUB_CFG=/efi/EFI/steamos/grub.cfg
 VOLKEY_PY="$USER_HOME/oxp3-fix/oxp3-volkey-fix.py"          # in /home, survives updates
 VOLKEY_UNIT=/etc/systemd/system/oxp3-volkey-fix.service
+BATT_SH="$USER_HOME/oxp3-fix/oxp3-battery-clamp.sh"          # in /home, survives updates
+BATT_UNIT=/etc/systemd/system/oxp3-battery-clamp.service
 IP_YAML=/etc/inputplumber/devices.d/50-onexplayer_3.yaml
 IP_CAPMAP=/etc/inputplumber/capability_maps.d/onexplayer_type3.yaml   # id oxp3: Home key -> Guide   # InputPlumber 0.78 override dir is devices.d
 
@@ -334,6 +342,101 @@ WantedBy=multi-user.target
 EOT
 )
 
+BATT_SH_CONTENT=$(cat <<'EOT'
+#!/bin/bash
+# oxp3-battery-clamp.sh - keep the ONEXPLAYER 3 battery percentage at or below 100 %.
+#
+# The battery gauge ("Intel SR 1", model "SR Real Battery") reports an energy_now above its own energy_full after a
+# full charge (seen: 92.17 Wh now vs 89.88 Wh full, design 84.55 Wh). Two things then show more than 100 %:
+#   * the ACPI battery driver reports /sys/class/power_supply/BAT0/capacity = 103 (rounded, not clamped because
+#     energy_full is above the design value); Steam reads that through its bundled SDL3 -> 103 % in the Steam UI;
+#   * the performance overlay (mangoapp / MangoHud) computes energy_now / energy_full itself -> 101-103 %.
+# upower is the only reader that clamps.
+#
+# Fix: bind-mount tmpfs files over the sysfs "capacity" and "energy_full" attributes. energy_full is reported as
+# max(kernel energy_full, energy_now) - the value the battery demonstrably holds, the same thing upower does - and
+# capacity as min(100, round(energy_now * 100 / energy_full)). Refreshed once a minute with fixed-width in-place
+# writes, so a reader never sees an empty file. energy_now / status / uevent stay untouched. Runs as a root service
+# (see the fix pack). Revert: systemctl disable --now oxp3-battery-clamp.service (ExecStopPost unmounts both files).
+BAT=/sys/class/power_supply/BAT0
+[ -r "$BAT/energy_now" ] && [ -r "$BAT/energy_full" ] || exit 0
+REALDIR="$(readlink -f "$BAT")"
+DIR=/run/oxp3-battery
+INTERVAL=${OXP3_BATTERY_INTERVAL:-60}   # the percentage moves about 1 % per minute at most
+
+kernel_full() { # the driver's energy_full, read from behind our own mount if it is already there
+    if mountpoint -q "$REALDIR/energy_full"; then cat "$DIR/kernel_energy_full"; else cat "$BAT/energy_full"; fi
+}
+
+compute() { # sets FULL (uWh) and PCT
+    local n f
+    n=$(cat "$BAT/energy_now"); f=$(kernel_full)
+    [ "${f:-0}" -gt 0 ] || f=$n
+    [ -s "$DIR/max_energy_now" ] && [ "$(cat "$DIR/max_energy_now")" -gt "$n" ] 2>/dev/null && n_max=$(cat "$DIR/max_energy_now") || n_max=$n
+    echo "$n_max" > "$DIR/max_energy_now"
+    FULL=$f; [ "$n_max" -gt "$FULL" ] && FULL=$n_max
+    PCT=$(( (n * 100 + FULL / 2) / FULL ))
+    [ "$PCT" -gt 100 ] && PCT=100
+    [ "$PCT" -lt 0 ] && PCT=0
+}
+
+write_fixed() { # write_fixed <file> <width> <value>: in-place, no truncation (single write of a fixed-size record)
+    printf "%${2}d\n" "$3" | dd of="$1" bs=$(( $2 + 1 )) count=1 conv=notrunc status=none
+}
+
+case "$1" in
+    --stop)
+        for a in capacity energy_full; do mountpoint -q "$REALDIR/$a" && umount "$REALDIR/$a"; done
+        exit 0 ;;
+    --once)
+        if ! mkdir -p "$DIR" 2>/dev/null || [ ! -w "$DIR" ]; then   # not root: keep the service's state untouched
+            t=$(mktemp -d); [ -f "$DIR/kernel_energy_full" ] && cp "$DIR/kernel_energy_full" "$DIR/max_energy_now" "$t/" 2>/dev/null; DIR=$t
+        fi
+        compute
+        echo "energy_now=$(cat "$BAT/energy_now") kernel energy_full=$(kernel_full) -> reported energy_full=$FULL capacity=$PCT"
+        exit 0 ;;
+esac
+
+mkdir -p "$DIR"
+mountpoint -q "$REALDIR/energy_full" || cat "$BAT/energy_full" > "$DIR/kernel_energy_full"
+compute
+[ -s "$DIR/capacity" ]    || printf '%3d\n' "$PCT"  > "$DIR/capacity"
+[ -s "$DIR/energy_full" ] || printf '%9d\n' "$FULL" > "$DIR/energy_full"
+for a in capacity energy_full; do
+    mountpoint -q "$REALDIR/$a" || mount --bind "$DIR/$a" "$REALDIR/$a" || exit 1
+done
+last=""
+while :; do
+    compute
+    if [ "$PCT/$FULL" != "$last" ]; then
+        write_fixed "$DIR/capacity" 3 "$PCT"
+        write_fixed "$DIR/energy_full" 9 "$FULL"
+        last="$PCT/$FULL"
+    fi
+    sleep "$INTERVAL"
+done
+EOT
+)
+
+BATT_UNIT_CONTENT=$(cat <<'EOT'
+[Unit]
+Description=OXP3: keep the battery percentage at or below 100 % (sysfs overlay for Steam / performance overlay)
+# see the header of __BATT_SH__ ; revert: systemctl disable --now oxp3-battery-clamp.service
+After=basic.target
+ConditionPathExists=/sys/class/power_supply/BAT0/energy_now
+
+[Service]
+Type=simple
+ExecStart=/bin/bash __BATT_SH__
+ExecStopPost=/bin/bash __BATT_SH__ --stop
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOT
+)
+
 IP_YAML_CONTENT=$(cat <<'EOT'
 # yaml-language-server: $schema=https://raw.githubusercontent.com/ShadowBlip/InputPlumber/main/rootfs/usr/share/inputplumber/schema/composite_device_v1.json
 # ONEXPLAYER 3 (Intel Panther Lake) - custom InputPlumber composite device (oxp-debug 2026-09-06)
@@ -467,6 +570,7 @@ filtered_events: []
 EOT
 )
 VOLKEY_UNIT_CONTENT="${VOLKEY_UNIT_CONTENT//__VOLKEY_PY__/$VOLKEY_PY}"
+BATT_UNIT_CONTENT="${BATT_UNIT_CONTENT//__BATT_SH__/$BATT_SH}"
 
 # ---- helpers ------------------------------------------------------
 say()  { printf '%s\n' "$*"; }
@@ -474,7 +578,7 @@ hdr()  { printf '\n== %s ==\n' "$*"; }
 same_content() { # same_content <file> <content>  -> 0 if identical
     [ -f "$1" ] && [ "$(cat "$1")" = "$2" ]
 }
-CHANGED=0; NEED_REBOOT=0; NEED_RELOGIN=0; VOLKEY_RESTART=0; IP_RESTART=0
+CHANGED=0; NEED_REBOOT=0; NEED_RELOGIN=0; VOLKEY_RESTART=0; IP_RESTART=0; BATT_RESTART=0
 
 # ---- guards -----------------------------------------------------------
 DMI_VENDOR="$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || true)"
@@ -529,6 +633,11 @@ if [ -f "$LUA_HDR" ]; then say "  HDR lua $LUA_HDR : present"; else say "  HDR l
 if [ -f "$LUA_NOHDR" ]; then say "  old nohdr lua $LUA_NOHDR : present (will be removed)"; fi
 if systemctl is-active -q oxp3-volkey-fix.service 2>/dev/null; then say "  volume-key fix service oxp3-volkey-fix : active"; else say "  volume-key fix service oxp3-volkey-fix : inactive/missing"; fi
 if systemctl is-active -q inputplumber.service 2>/dev/null; then say "  InputPlumber (paddles/gamepad) : active"; else say "  InputPlumber (paddles/gamepad) : inactive"; fi
+BAT_SYS=/sys/class/power_supply/BAT0
+if [ -r "$BAT_SYS/energy_now" ]; then
+    say "  battery gauge : energy_now=$(cat "$BAT_SYS/energy_now") energy_full=$(cat "$BAT_SYS/energy_full" | tr -d ' ') capacity=$(cat "$BAT_SYS/capacity" | tr -d ' ')%   ($(findmnt -T "$BAT_SYS/capacity" -n -o SOURCE 2>/dev/null | grep -q oxp3-battery && echo "overlay active" || echo "raw kernel values"))"
+    if systemctl is-active -q oxp3-battery-clamp.service 2>/dev/null; then say "  battery clamp service oxp3-battery-clamp : active"; else say "  battery clamp service oxp3-battery-clamp : inactive/missing"; fi
+fi
 if [ -n "$OXP_DEV" ]; then
     say "  hid-oxp MCU driver (paddles) : $(basename "$OXP_DEV") gamepad_mode=$OXP_MODE button_m1=$OXP_M1 button_m2=$OXP_M2   expected xinput / KEY_F16 / KEY_F17"
 else
@@ -573,6 +682,9 @@ if [ "$MODE" = "--check" ]; then
     same_content "$VOLKEY_PY" "$VOLKEY_PY_CONTENT" || { say "  [diff] volkey .py missing or differs"; ok=0; }
     same_content "$VOLKEY_UNIT" "$VOLKEY_UNIT_CONTENT" || { say "  [diff] volkey unit missing or differs"; ok=0; }
     systemctl is-enabled -q oxp3-volkey-fix.service 2>/dev/null || { say "  [diff] oxp3-volkey-fix.service not enabled"; ok=0; }
+    same_content "$BATT_SH" "$BATT_SH_CONTENT" || { say "  [diff] battery clamp script missing or differs"; ok=0; }
+    same_content "$BATT_UNIT" "$BATT_UNIT_CONTENT" || { say "  [diff] battery clamp unit missing or differs"; ok=0; }
+    systemctl is-enabled -q oxp3-battery-clamp.service 2>/dev/null || { say "  [diff] oxp3-battery-clamp.service not enabled"; ok=0; }
     same_content "$IP_YAML" "$IP_YAML_CONTENT" || { say "  [diff] IP yaml missing or differs"; ok=0; }
     same_content "$IP_CAPMAP" "$IP_CAPMAP_CONTENT" || { say "  [diff] IP capability map missing or differs"; ok=0; }
     systemctl is-enabled -q inputplumber.service 2>/dev/null || { say "  [diff] inputplumber.service not enabled"; ok=0; }
@@ -639,6 +751,8 @@ if [ "$MODE" = "--revert" ]; then
     if [ -f "$IP_YAML" ]; then sudo systemctl disable --now inputplumber.service 2>/dev/null || true; sudo rm -f "$IP_YAML"; say "  InputPlumber disabled and OXP3 config removed (gamepad back to plain xpad)"; fi
     if [ -f "$VOLKEY_UNIT" ]; then sudo systemctl disable --now oxp3-volkey-fix.service 2>/dev/null || true; sudo rm -f "$VOLKEY_UNIT"; sudo systemctl daemon-reload; say "  oxp3-volkey-fix.service stopped and removed (volume keys back to raw EC behavior)"; fi
     if [ -f "$VOLKEY_PY" ]; then rm -f "$VOLKEY_PY"; say "  removed $VOLKEY_PY"; fi
+    if [ -f "$BATT_UNIT" ]; then sudo systemctl disable --now oxp3-battery-clamp.service 2>/dev/null || true; sudo rm -f "$BATT_UNIT"; sudo systemctl daemon-reload; say "  oxp3-battery-clamp.service stopped and removed (raw kernel battery values again)"; fi
+    if [ -f "$BATT_SH" ]; then rm -f "$BATT_SH"; say "  removed $BATT_SH"; fi
     if [ -f "$LUA_HDR" ]; then mv -f "$LUA_HDR" "$USER_HOME/oxp3-oled-hdr.lua.disabled"; say "  HDR lua moved to $USER_HOME/oxp3-oled-hdr.lua.disabled"; NEED_RELOGIN=1; fi
     if [ -f "$LUA_NOHDR_BAK" ] && [ ! -f "$LUA_NOHDR" ]; then mkdir -p "$LUA_DIR"; cp -f "$LUA_NOHDR_BAK" "$LUA_NOHDR"; say "  nohdr lua restored (prevents a black screen when HDR is on)"; NEED_RELOGIN=1; fi
     say "revert done. (The Wi-Fi firmware step is not undone: linux-firmware stays installed.)"
@@ -664,6 +778,7 @@ say "   3) $LUA_HDR (gamescope HDR lua) and remove 99-oxp3-nohdr.lua"
 say "   4) $VOLKEY_PY + $VOLKEY_UNIT (volume-key fix)   $(have_evdev && echo "[python3-evdev OK]" || echo "[SKIPPED: python3 evdev missing]")"
 say "   5) $IP_YAML + $IP_CAPMAP + enable inputplumber   $(have_ip && echo "[inputplumber OK]" || echo "[SKIPPED: inputplumber missing]")"
 say "      + paddle driver state: hid-oxp gamepad_mode=xinput, button_m1/m2=KEY_F16/KEY_F17   $([ -n "$OXP_DEV" ] && echo "[hid-oxp OK]" || echo "[SKIPPED: hid-oxp not bound]")"
+say "   6) $BATT_SH + $BATT_UNIT (battery percentage clamp)   $([ -r /sys/class/power_supply/BAT0/energy_now ] && echo "[battery OK]" || echo "[SKIPPED: no energy_* battery]")"
 if [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then read -r -p "  Continue? (y/N) " _ans; case "$_ans" in y|Y) ;; *) say "  cancelled."; exit 0 ;; esac; fi
 sudo -v
 
@@ -885,6 +1000,33 @@ else
         printf 'KEY_F17' | sudo tee "$OXP_DEV/button_m2" >/dev/null && say "  [write] $(basename "$OXP_DEV")/button_m2 = KEY_F17 (was $OXP_M2)"; CHANGED=1
     fi
     say "  paddles re-asserted via the driver."
+fi
+
+# e5. battery percentage clamp (root service, sysfs overlay; takes effect immediately, no reboot)
+if [ ! -r /sys/class/power_supply/BAT0/energy_now ]; then
+    say "  [skip] no BAT0 with energy_* attributes, skipping battery clamp"
+else
+mkdir -p "$(dirname "$BATT_SH")"
+if same_content "$BATT_SH" "$BATT_SH_CONTENT"; then
+    say "  [skip] $BATT_SH unchanged"
+else
+    printf '%s\n' "$BATT_SH_CONTENT" > "$BATT_SH"; chmod +x "$BATT_SH"
+    say "  [write] $BATT_SH"; CHANGED=1; BATT_RESTART=1
+fi
+if same_content "$BATT_UNIT" "$BATT_UNIT_CONTENT"; then
+    say "  [skip] $BATT_UNIT unchanged"
+else
+    printf '%s\n' "$BATT_UNIT_CONTENT" | sudo tee "$BATT_UNIT" >/dev/null
+    sudo systemctl daemon-reload
+    say "  [write] $BATT_UNIT"; CHANGED=1; BATT_RESTART=1
+fi
+if ! systemctl is-enabled -q oxp3-battery-clamp.service 2>/dev/null; then
+    sudo systemctl enable oxp3-battery-clamp.service >/dev/null 2>&1
+    say "  [enable] oxp3-battery-clamp.service"; CHANGED=1; BATT_RESTART=1
+fi
+if [ "$BATT_RESTART" = 1 ] || ! systemctl is-active -q oxp3-battery-clamp.service 2>/dev/null; then
+    sudo systemctl restart oxp3-battery-clamp.service && say "  [restart] oxp3-battery-clamp.service (capacity now $(sleep 1; cat /sys/class/power_supply/BAT0/capacity | tr -d ' ')%)"
+fi
 fi
 
 # f. summary
