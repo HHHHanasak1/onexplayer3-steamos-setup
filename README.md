@@ -105,7 +105,6 @@ As of 2026-09-22 these fixes have been in daily use for about half a month, incl
 - **Volume key root cause** is in the embedded controller firmware. A firmware update from the vendor would remove the need for the forwarder.
 - **HDR uses the gamma-2.2 path.** A true PQ path (`xe.enable_dpcd_backlight=1`) has not been tested.
 - **Speakers are very occasionally silent after boot.** A reboot fixes it. Not investigated yet.
-- **Leave VRR off.** With VRR on, the panel never runs above ~74 fps (every second flip waits the 33 ms VRR floor) and a few VRR/refresh toggles can leave it at 30 fps or partly frozen (`Timed out waiting PSR idle state`). Switch VRR only while no game is running. Details and upstream notes: [issue #1](https://github.com/HHHHanasak1/onexplayer3-steamos-setup/issues/1), `issues/05-vrr-psr.md`.
 - **Lighting is not part of this pack**, see the Lighting section above. Never unbind or rebind hid-oxp: it triggers a kernel Oops (`issues/hid_oxp_oops_rebind.txt`).
 
 Upstream bug drafts are in `issues/`.
