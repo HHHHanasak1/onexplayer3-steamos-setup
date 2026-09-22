@@ -7,6 +7,13 @@
 #         continuous VRR; the v1.0.1 lua declared dynamic_refresh_rates but never shipped the
 #         matching dynamic_modegen function, so no extra Hz options ever actually appeared in the
 #         Steam Performance panel's per-game refresh-rate selector).
+# v1.3.1: step 0 fixed. SteamOS ships its own linux-firmware-neptune package, which satisfies "linux-firmware" for
+#         pacman but lacks the BE201 (Wi-Fi 7, CNVi 8086:e440) files iwlwifi-sc-a0-fm-c0-c10x and the matching Bluetooth
+#         intel/ibt-00a0-0291-*, so the old "already installed" test skipped the fix and every OS update brings the
+#         problem back. Now the step looks at the driver state (iwlwifi bound but no wireless interface / Bluetooth
+#         firmware load failure), downloads the repo's linux-firmware-intel package once (cached in ~/.cache/oxp3-fix)
+#         and extracts only the missing firmware families into /usr/lib/firmware (never overwriting existing files,
+#         no package replacement). Wi-Fi comes up immediately (driver reload); Bluetooth after the reboot.
 # v1.3.0: new step 0 at the very start of apply: Wi-Fi firmware. Unlocks the read-only root filesystem, initializes the
 #         pacman keyring and installs linux-firmware (needs some other network connection for the download,
 #         e.g. USB Ethernet or USB tethering). Skip it with --no-wifi.
@@ -18,7 +25,7 @@
 #         the hid-oxp sysfs (driver pages 1-2 only, never raw hidraw); new --mcu-restore (DANGEROUS, explicit, confirmed)
 #         rewrites MCU button-table page 3 (Home 0x24 + factory-default 0x21/0x25-0x2B) to recover a Home/Xbox
 #         key that went silent after a foreign tool overwrote the MCU table.
-OXP3_FIXES_VERSION="v1.3.0 (2026-09-20)"
+OXP3_FIXES_VERSION="v1.3.1 (2026-09-22)"
 TESTED_STEAMOS_BUILD="20260827.1000"
 TESTED_KERNEL_PREFIX="7.2.0-valve1"
 # ============================================================================
@@ -530,18 +537,34 @@ fi
 RO_STATUS="$(steamos-readonly status 2>/dev/null | head -n1 || true)"   # note: exits non-zero when disabled
 [ -n "$RO_STATUS" ] || RO_STATUS=unknown
 say "  steamos-readonly : $RO_STATUS"
-if command -v pacman >/dev/null 2>&1 && pacman -Q linux-firmware >/dev/null 2>&1; then
-    say "  linux-firmware package : installed ($(pacman -Q linux-firmware | cut -d' ' -f2))"
+# Wi-Fi / Bluetooth firmware state. The kernel names the firmware family it wants in the boot log; the package that
+# provides "linux-firmware" on SteamOS (linux-firmware-neptune) does not carry every family.
+IWL_DEV=""   # Intel network controller (class 0x0280) - present even when iwlwifi gave up for lack of firmware
+for _d in /sys/bus/pci/devices/*; do
+    if [ "$(cat "$_d/class" 2>/dev/null)" = "0x028000" ] && [ "$(cat "$_d/vendor" 2>/dev/null)" = "0x8086" ]; then IWL_DEV="$(basename "$_d")"; break; fi
+done
+WL_IF="$(ls -d /sys/class/net/*/wireless 2>/dev/null | head -n1 | cut -d/ -f5 || true)"
+IWL_FAMILY="$(journalctl -k -b 0 --no-pager 2>/dev/null | sed -n 's/.*minimum version required: \(iwlwifi-[^ ]*\)-c\{0,1\}[0-9]*$/\1/p' | tail -n1)"
+[ -n "$IWL_FAMILY" ] || IWL_FAMILY="$(journalctl -k -b 0 --no-pager 2>/dev/null | sed -n 's/.*Direct firmware load for \(iwlwifi-[^ ]*\)-c\{0,1\}[0-9]*\.ucode failed.*/\1/p' | tail -n1)"
+BT_FAMILY="$(journalctl -k -b 0 --no-pager 2>/dev/null | sed -n 's/.*Failed to load Intel firmware file intel\/\(ibt-[0-9a-f]*-[0-9a-f]*\)-.*/\1/p' | tail -n1)"
+WIFI_MISSING=0; BT_MISSING=0
+[ -n "$IWL_DEV" ] && [ -z "$WL_IF" ] && WIFI_MISSING=1
+[ -n "$BT_FAMILY" ] && ! ls /usr/lib/firmware/intel/"$BT_FAMILY"-* >/dev/null 2>&1 && BT_MISSING=1
+if [ -n "$IWL_DEV" ]; then
+    say "  Wi-Fi (Intel $IWL_DEV) : $([ -n "$WL_IF" ] && echo "interface $WL_IF present" || echo "NO wireless interface - firmware ${IWL_FAMILY:-?} missing")"
 else
-    say "  linux-firmware package : NOT installed"
+    say "  Wi-Fi : no Intel network controller found"
 fi
-if [ -s /etc/pacman.d/gnupg/trustdb.gpg ]; then say "  pacman keyring : initialized"; else say "  pacman keyring : NOT initialized"; fi
+if [ -n "$BT_FAMILY" ]; then say "  Bluetooth firmware intel/$BT_FAMILY : $([ "$BT_MISSING" = 1 ] && echo MISSING || echo present)"; fi
+if command -v pacman >/dev/null 2>&1 && pacman -Q linux-firmware >/dev/null 2>&1; then
+    say "  linux-firmware package : $(pacman -Q linux-firmware | tr ' ' '-')   (SteamOS' own package; may lack newer chips)"
+fi
 
 if [ "$MODE" = "--check" ]; then
     hdr "check-only, nothing changed"
     ok=1
-    if [ "$SKIP_WIFI" != 1 ] && ! { command -v pacman >/dev/null 2>&1 && pacman -Q linux-firmware >/dev/null 2>&1; }; then
-        say "  [diff] linux-firmware is not installed (Wi-Fi may not work; apply installs it)"; ok=0
+    if [ "$SKIP_WIFI" != 1 ] && { [ "$WIFI_MISSING" = 1 ] || [ "$BT_MISSING" = 1 ]; }; then
+        say "  [diff] Wi-Fi/Bluetooth firmware missing (apply extracts it from linux-firmware-intel)"; ok=0
     fi
     same_content "$GRUB_D_FILE" "$GRUB_D_CONTENT" || { say "  [diff] grub.d file missing or differs"; ok=0; }
     same_content "$MODPROBE_FILE" "$MODPROBE_CONTENT" || { say "  [diff] modprobe file missing or differs"; ok=0; }
@@ -633,7 +656,7 @@ say "  will check and write as needed:"
 if [ "$SKIP_WIFI" = 1 ]; then
     say "   0) Wi-Fi firmware   [SKIPPED: --no-wifi]"
 else
-    say "   0) Wi-Fi firmware: unlock rootfs, init pacman keyring, install linux-firmware   $({ command -v pacman >/dev/null 2>&1 && pacman -Q linux-firmware >/dev/null 2>&1; } && echo "[already installed]" || echo "[will install]")"
+    say "   0) Wi-Fi/Bluetooth firmware from linux-firmware-intel   $({ [ "$WIFI_MISSING" = 1 ] || [ "$BT_MISSING" = 1 ]; } && echo "[will extract missing files]" || echo "[nothing missing]")"
 fi
 say "   1) $GRUB_D_FILE (nvme.noacpi=1) + update-grub   $(nvme_bug_present && echo "[SSD matches]" || echo "[SKIPPED: not the affected SSD; use --force-nvme]")"
 say "   2) $MODPROBE_FILE (xe enable_dsb=0)"
@@ -644,49 +667,86 @@ say "      + paddle driver state: hid-oxp gamepad_mode=xinput, button_m1/m2=KEY_
 if [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then read -r -p "  Continue? (y/N) " _ans; case "$_ans" in y|Y) ;; *) say "  cancelled."; exit 0 ;; esac; fi
 sudo -v
 
-# ---- 0. Wi-Fi firmware (first step: a fresh SteamOS install may have no working Wi-Fi) --------------
-# Everything here needs a writable root filesystem, an initialized pacman keyring, and SOME network
-# connection for the download (USB Ethernet or USB tethering if Wi-Fi is what is broken).
+# ---- 0. Wi-Fi / Bluetooth firmware --------------------------------------------------------------
+# SteamOS' linux-firmware-neptune provides "linux-firmware" but not every chip family (the OXP3's BE201 needs
+# iwlwifi-sc-a0-fm-c0-c10x + intel/ibt-00a0-0291-*). Download the repo's linux-firmware-intel package (cached) and
+# extract only the missing families into /usr/lib/firmware; existing files are never overwritten and no package is
+# replaced. Needs a writable rootfs and some network connection (USB Ethernet / USB tethering while Wi-Fi is down).
 WIFI_FAILED=0
 if [ "$SKIP_WIFI" = 1 ]; then
     say "  [skip] Wi-Fi firmware step disabled (--no-wifi)"
+elif [ "$WIFI_MISSING" != 1 ] && [ "$BT_MISSING" != 1 ]; then
+    say "  [skip] Wi-Fi/Bluetooth firmware: nothing missing"
 elif ! command -v pacman >/dev/null 2>&1; then
-    say "  [skip] pacman not found, cannot install linux-firmware"; WIFI_FAILED=1
-elif pacman -Q linux-firmware >/dev/null 2>&1; then
-    say "  [skip] linux-firmware already installed ($(pacman -Q linux-firmware | cut -d' ' -f2))"
+    say "  [skip] pacman not found, cannot locate linux-firmware-intel"; WIFI_FAILED=1
+elif ! ip route 2>/dev/null | grep -q '^default'; then
+    say "  [skip] no network connection, cannot download linux-firmware-intel."
+    say "         Connect USB Ethernet or USB tethering and run this script again."
+    WIFI_FAILED=1
 else
-    hdr "0. Wi-Fi firmware (linux-firmware)"
+    hdr "0. Wi-Fi / Bluetooth firmware (from linux-firmware-intel)"
     if [ "$RO_STATUS" = "enabled" ]; then
-        say "  rootfs is read-only; disabling so packages can be installed (updates re-enable it)"
+        say "  rootfs is read-only; disabling so /usr/lib/firmware can be written (updates re-enable it)"
         sudo steamos-readonly disable
         RO_STATUS=disabled
     fi
-    if [ ! -s /etc/pacman.d/gnupg/trustdb.gpg ]; then
-        say "  [run] pacman-key --init"
-        sudo pacman-key --init
+    FW_URL="$(pacman -Sp linux-firmware-intel 2>/dev/null | grep -m1 '^http' || true)"
+    if [ -z "$FW_URL" ]; then
+        say "  [run] pacman -Sy   (package database sync, needed to locate linux-firmware-intel)"
+        sudo pacman -Sy >/dev/null 2>&1 || true
+        FW_URL="$(pacman -Sp linux-firmware-intel 2>/dev/null | grep -m1 '^http' || true)"
     fi
-    if [ "$(sudo pacman-key --list-keys 2>/dev/null | grep -c '^pub' || true)" -lt 20 ]; then
-        for _kr in archlinux holo; do
-            if [ -f "/usr/share/pacman/keyrings/$_kr.gpg" ]; then
-                say "  [run] pacman-key --populate $_kr"
-                sudo pacman-key --populate "$_kr"
-            fi
-        done
-    fi
-    if ! ip route 2>/dev/null | grep -q '^default'; then
-        say "  [skip] no network connection, cannot download linux-firmware."
-        say "         Connect USB Ethernet or USB tethering and run this script again."
-        WIFI_FAILED=1
+    if [ -z "$FW_URL" ]; then
+        say "  [error] linux-firmware-intel not found in the configured repositories"; WIFI_FAILED=1
     else
-        PACMAN_YES=""; [ "$ASSUME_YES" = 1 ] && PACMAN_YES="--noconfirm"
-        say "  [run] pacman -Sy linux-firmware   (syncs the package databases and installs only this package)"
-        # shellcheck disable=SC2086
-        if sudo pacman -Sy --needed $PACMAN_YES linux-firmware; then
-            say "  [done] linux-firmware installed"
-            CHANGED=1; NEED_REBOOT=1
+        FW_CACHE="$USER_HOME/.cache/oxp3-fix"; mkdir -p "$FW_CACHE"
+        FW_PKG="$FW_CACHE/$(basename "$FW_URL")"
+        if [ ! -s "$FW_PKG" ]; then
+            say "  [run] downloading $(basename "$FW_URL") (about 130 MB) ..."
+            curl -fL --retry 3 --progress-bar -o "$FW_PKG.part" "$FW_URL" && mv "$FW_PKG.part" "$FW_PKG" || { rm -f "$FW_PKG.part"; say "  [error] download failed"; WIFI_FAILED=1; }
         else
-            say "  [error] pacman failed. On a signature or keyring error run: sudo pacman-key --populate archlinux holo"
-            WIFI_FAILED=1
+            say "  [skip] using cached $(basename "$FW_PKG")"
+        fi
+        if [ -s "$FW_PKG" ] && tar --zstd -tf "$FW_PKG" >/dev/null 2>&1; then
+            FW_PATTERNS=""
+            if [ "$WIFI_MISSING" = 1 ]; then
+                if [ -n "$IWL_FAMILY" ]; then FW_PATTERNS="$FW_PATTERNS ${IWL_FAMILY}*"; else FW_PATTERNS="$FW_PATTERNS iwlwifi-*"; fi
+            fi
+            [ "$BT_MISSING" = 1 ] && FW_PATTERNS="$FW_PATTERNS ${BT_FAMILY}-*"
+            FW_TMP="$(mktemp -d "${TMPDIR:-/tmp}/oxp3-fw.XXXXXX")"
+            say "  [run] extracting$FW_PATTERNS (files and symlinks; symlink targets are added as needed)"
+            # shellcheck disable=SC2086
+            tar --zstd -xf "$FW_PKG" -C "$FW_TMP" --wildcards --no-anchored $FW_PATTERNS 2>/dev/null || true
+            # symlinks whose target is neither on the system nor in the extracted set: pull the target from the package too
+            for _round in 1 2 3; do
+                _more=""
+                while IFS= read -r _l; do
+                    _t="$(readlink "$_l")"; _dir="$(dirname "$_l")"
+                    _sys="/usr/lib/firmware${_dir#"$FW_TMP"/usr/lib/firmware}/$_t"
+                    [ -e "$_dir/$_t" ] || [ -e "$_sys" ] || _more="$_more $(basename "$_t")"
+                done < <(find "$FW_TMP" -type l 2>/dev/null)
+                [ -n "$_more" ] || break
+                # shellcheck disable=SC2086
+                tar --zstd -xf "$FW_PKG" -C "$FW_TMP" --wildcards --no-anchored $_more 2>/dev/null || true
+            done
+            _n=$(find "$FW_TMP" \( -type f -o -type l \) | wc -l)
+            if [ "$_n" = 0 ]; then
+                say "  [error] the package has no ${IWL_FAMILY:-iwlwifi}/${BT_FAMILY:-ibt} firmware (kernel/package version mismatch)"; WIFI_FAILED=1
+            elif sudo cp -an "$FW_TMP/usr/lib/firmware/." /usr/lib/firmware/; then
+                say "  [done] $_n firmware files/links in place (existing files untouched)"
+                CHANGED=1; NEED_REBOOT=1
+                if [ "$WIFI_MISSING" = 1 ]; then
+                    say "  [run] reloading iwlwifi so Wi-Fi comes up now (Bluetooth needs the reboot)"
+                    sudo modprobe -r iwlmld iwlmvm iwlwifi 2>/dev/null || true
+                    sudo modprobe iwlwifi 2>/dev/null || true
+                    sleep 4
+                    WL_IF="$(ls -d /sys/class/net/*/wireless 2>/dev/null | head -n1 | cut -d/ -f5 || true)"
+                    say "  Wi-Fi interface now: ${WL_IF:-still missing (check: journalctl -k | grep iwlwifi)}"
+                fi
+            else
+                say "  [error] copying into /usr/lib/firmware failed"; WIFI_FAILED=1
+            fi
+            rm -rf "$FW_TMP"
         fi
     fi
 fi
@@ -829,7 +889,7 @@ fi
 
 # f. summary
 hdr "Summary"
-if [ "$WIFI_FAILED" = 1 ]; then say "  Wi-Fi firmware step did not complete, see the messages above."; fi
+if [ "$WIFI_FAILED" = 1 ]; then say "  Wi-Fi/Bluetooth firmware step did not complete, see the messages above."; fi
 if [ $CHANGED = 1 ]; then say "  changes were made."; else say "  nothing to change, all fixes in place."; fi
 if [ $NEED_REBOOT = 1 ]; then
     say "  REBOOT REQUIRED (kernel parameter or xe module parameter not active yet)"

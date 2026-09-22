@@ -64,7 +64,7 @@ This is the recovery-image method that works on this machine. You need a Windows
 
 | Symptom | Root cause | Fix |
 |---|---|---|
-| **No Wi-Fi** (Intel CNVi Wi-Fi, `iwlwifi`) | The firmware files the driver needs for the chip are not installed, and the system is not ready to install them | `pacman -Sy linux-firmware` It needs another network connection for the download, for example USB Ethernet or USB tethering. It is skipped when `linux-firmware` is already installed, and `--no-wifi` skips it explicitly |
+| **No Wi-Fi / no Bluetooth** (Intel BE201 CNVi `8086:e440`, `iwlwifi`) | SteamOS' own `linux-firmware-neptune` satisfies `linux-firmware` but lacks the BE201 files (`iwlwifi-sc-a0-fm-c0-c10x`, `intel/ibt-00a0-0291-*`); every OS update restores that package | Step 0 downloads the repo's `linux-firmware-intel` once (cached in `~/.cache/oxp3-fix`) and extracts only the missing firmware families into `/usr/lib/firmware`, without overwriting files or replacing packages. Needs a temporary network connection (USB Ethernet or phone tethering). Wi-Fi works right away, Bluetooth after the reboot. |
 | **Game-mode suspend/resume freeze** | The Predator GM7 NVMe (Biwin/Maxio `1dee:1602`) fails to come back from s2idle through the ACPI StorageD3 path (`nvme nvme0: Disabling device after reset failure: -19`), and the root filesystem goes away | Kernel parameter `nvme.noacpi=1` via `/etc/default/grub.d/oxp3-nvme.cfg` plus `update-grub`. Applied only when that SSD is present. Deep S0ix is still reached |
 | **Panel stays black in game mode** after boot, session switch or resume; brightness slider does nothing | gamescope enables HDR and xe drives the Samsung AMS881KB01-0 OLED with BT.2020/PQ 10 bpc. The panel implements Intel's eDP HDR interface but the driver never enables its backlight channel, so the output is treated as SDR | A gamescope known-display lua keeps the panel in native gamma-2.2 mode and lets gamescope tone-map internally, the same approach as the Steam Deck OLED. HDR works and the brightness slider starts working |
 | **Performance panel sometimes offers only one refresh rate** | The panel has genuine continuous 30-144 Hz VRR, but the lua only declared `dynamic_refresh_rates` without the matching `dynamic_modegen` function, so gamescope never generated any real modes | The same lua now registers the full 30-144 Hz range. The timing formula is derived from, and verified against, the 60 Hz and 144 Hz modes reported by the driver |
@@ -86,7 +86,7 @@ cp OXP3-*.desktop ~/Desktop/ && chmod +x ~/Desktop/OXP3-*.desktop   # optional d
 Flags: `--yes`, `--force`, `--force-nvme`, `--no-wifi`.
 
 - SteamOS updates may make the root filesystem read-only again, reset `/etc` and remove installed packages. Re-run the script afterwards; it is idempotent. If the filesystem is read-only, the script runs `steamos-readonly disable` first.
-- On a machine without working Wi-Fi, connect USB Ethernet or USB tethering before running the script, so the script can download `linux-firmware`. Without any network the step is skipped with a message and the other fixes still run. A reboot is needed afterwards so the driver loads the new firmware.
+- On a machine without working Wi-Fi, connect USB Ethernet or USB tethering before running the script, so the script can download `linux-firmware-intel`. Without any network the step is skipped with a message and the other fixes still run. A reboot is needed afterwards so the driver loads the new firmware.
 - Remove earlier hacks of your own first, such as boot-time `chvt` scripts or a masked `powerbuttond`, because they can interfere.
 - Do not unbind or rebind hid-oxp, and do not write raw commands to the `1a86:fe00` hidraw device.
 - After enabling InputPlumber mid-session, the controller page in Steam may need `sudo systemctl restart inputplumber` or a Steam restart before it shows the controller.
@@ -99,12 +99,13 @@ The fix pack does not touch lighting: the kernel hid-oxp LED interface has no ef
 
 ### Known issues and limitations
 
-As of 2026-09-20 these fixes have been in daily use for about half a month. Only the gyroscope is known not to work, and no other stability problems have been seen apart from the rare speaker case below.
+As of 2026-09-22 these fixes have been in daily use for about half a month, including across the 20260921.1000 SteamOS update (re-run the script after an update). Only the gyroscope is known not to work, and no other stability problems have been seen apart from the rare speaker case below.
 
 - **Gyroscope: recognized, but severe drift.** The sensor is a Bosch BMI260 that the kernel does not identify on its own. An ACPI table override makes it probe and deliver data, and with corrected units, axis order and mount matrix the direction is right. Flat-steering use still drifts by several degrees per minute, because the temperature-dependent bias about the vertical axis cannot be corrected with gravity. Static compensation, automatic calibration and no compensation were all tried without a usable result. This pack does not enable the gyroscope. See `issues/03-bmi160.md`.
 - **Volume key root cause** is in the embedded controller firmware. A firmware update from the vendor would remove the need for the forwarder.
 - **HDR uses the gamma-2.2 path.** A true PQ path (`xe.enable_dpcd_backlight=1`) has not been tested.
 - **Speakers are very occasionally silent after boot.** A reboot fixes it. Not investigated yet.
+- **Leave VRR off.** With VRR on, the panel never runs above ~74 fps (every second flip waits the 33 ms VRR floor) and a few VRR/refresh toggles can leave it at 30 fps or partly frozen (`Timed out waiting PSR idle state`). Switch VRR only while no game is running. Details and upstream notes: [issue #1](https://github.com/HHHHanasak1/onexplayer3-steamos-setup/issues/1), `issues/05-vrr-psr.md`.
 - **Lighting is not part of this pack**, see the Lighting section above. Never unbind or rebind hid-oxp: it triggers a kernel Oops (`issues/hid_oxp_oops_rebind.txt`).
 
 Upstream bug drafts are in `issues/`.
