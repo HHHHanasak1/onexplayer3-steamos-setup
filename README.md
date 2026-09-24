@@ -86,7 +86,22 @@ cd ~ && curl -fL https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releas
 ~/oxp3-fix/oxp3-apply-fixes.sh --revert    # undo everything, then reboot
 ```
 
-The archive extracts to `~/oxp3-fix` (the fix pack script, the patched InputPlumber used by the optional gyro step, its source patch, and the desktop icons). Extracting a newer release over it updates it in place. Optional desktop icons: `cp ~/oxp3-fix/OXP3-*.desktop ~/Desktop/ && chmod +x ~/Desktop/OXP3-*.desktop`.
+The archive extracts to `~/oxp3-fix` (the fix pack script, the patched InputPlumber used by the optional gyro step, its source patch, and the desktop icons). Extracting a newer release over it updates it in place.
+
+**Desktop icons (optional).** The archive contains two launchers for desktop mode, so the fix pack can be run by double-clicking instead of typing commands:
+
+| File | Icon name | What it runs |
+|---|---|---|
+| `OXP3-Fix.desktop` | OXP3 Fix Pack | `~/oxp3-fix/oxp3-apply-fixes.sh` (apply; use it after every SteamOS update) |
+| `OXP3-Revert.desktop` | OXP3 Revert Fix Pack | `~/oxp3-fix/oxp3-apply-fixes.sh --revert` (undo everything) |
+
+Put them on the desktop:
+
+```bash
+cp ~/oxp3-fix/OXP3-*.desktop ~/Desktop/ && chmod +x ~/Desktop/OXP3-*.desktop
+```
+
+Each opens a Konsole window that stays open, so you can type the sudo password, answer the questions (including the optional gyro prompt) and read the result. On the first double-click KDE may ask whether to trust or execute the file; allow it. The launchers expect the pack in `~/oxp3-fix`, which is where the archive extracts to.
 
 Flags: `--yes`, `--force`, `--force-nvme`, `--no-wifi`, `--gyro`, `--no-gyro`.
 
