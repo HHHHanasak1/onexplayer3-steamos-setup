@@ -1,12 +1,18 @@
 #!/bin/bash
 # oxp3-steamos-fixes - ONEXPLAYER 3 (Intel Panther Lake) SteamOS fix pack
-# Version: v1.4.0 (2026-09-22)     License: MIT (see LICENSE)     Author: HANA & Claude
+# Version: v1.5.0 (2026-09-24)     License: MIT (see LICENSE)     Author: HANA & Claude
 # Tested on: SteamOS 3.10 main build 20260827.1000, kernel 7.2.0-valve1-1-neptune-72, OXP3 BIOS 5.09,
 #            panel Samsung SDC AMS881KB01-0, SSD Predator GM7 1TB (Biwin/Maxio 1dee:1602)
 # v1.1.0: gamescope HDR lua now also registers real 30-144Hz dynamic_modegen (this panel has genuine
 #         continuous VRR; the v1.0.1 lua declared dynamic_refresh_rates but never shipped the
 #         matching dynamic_modegen function, so no extra Hz options ever actually appeared in the
 #         Steam Performance panel's per-game refresh-rate selector).
+# v1.5.0: new OPTIONAL, EXPERIMENTAL step 7, gyroscope (--gyro, or answer y when asked). The BMI260 IMU is invisible to the kernel
+#         (its ACPI node is named 10EC5280, which the bmi160 driver claims and fails on), so an ACPI table override renames it
+#         and the bmi270 driver binds. A patched InputPlumber 0.78.0 (gyro/ in the repo, prebuilt binary from the GitHub release,
+#         sha256 checked, falls back to the stock binary if it cannot run) feeds the Steam Deck virtual controller with corrected
+#         axes and a drift-relaxing response curve. Needs BIOS 5.09 and stock InputPlumber 0.78.x, otherwise it is skipped.
+#         --no-gyro removes it again; --revert removes it too. Nothing changes unless you opt in.
 # v1.4.0: new step 6, battery percentage clamp. After a full charge the gauge reports energy_now above its own
 #         energy_full (92.2 vs 89.9 Wh), the ACPI battery driver then reports capacity 103 and Steam (through its bundled
 #         SDL3) and the performance overlay (energy_now/energy_full) show 101-104 %. A small root service bind-mounts
@@ -29,14 +35,14 @@
 #         the hid-oxp sysfs (driver pages 1-2 only, never raw hidraw); new --mcu-restore (DANGEROUS, explicit, confirmed)
 #         rewrites MCU button-table page 3 (Home 0x24 + factory-default 0x21/0x25-0x2B) to recover a Home/Xbox
 #         key that went silent after a foreign tool overwrote the MCU table.
-OXP3_FIXES_VERSION="v1.4.0 (2026-09-22)"
+OXP3_FIXES_VERSION="v1.5.0 (2026-09-24)"
 TESTED_STEAMOS_BUILD="20260827.1000"
 TESTED_KERNEL_PREFIX="7.2.0-valve1"
 # ============================================================================
 # ONEXPLAYER 3 fix re-applier  (SteamOS 3.10, Intel Panther Lake, xe)
 # Purpose:
 #   SteamOS updates may overwrite /etc changes. This script re-applies all six fixes (idempotent),
-#   preceded by step 0 which gets Wi-Fi working on a fresh install:
+#   preceded by step 0 which gets Wi-Fi working on a fresh install, plus the optional experimental gyro step 7:
 #     0) Wi-Fi firmware - unlock the root filesystem, initialize the pacman keyring, install linux-firmware (--no-wifi skips)
 #     1) kernel param nvme.noacpi=1 (only for the Predator GM7 / 1dee:1602 SSD) - NVMe not resuming from s2idle
 #     2) xe enable_dsb=0 - silence the per-frame xe DSB error flood under gamescope
@@ -48,20 +54,23 @@ TESTED_KERNEL_PREFIX="7.2.0-valve1"
 #        (paddles rely on the in-kernel hid-oxp driver; this script only re-asserts its sysfs state, it never writes the MCU directly)
 #     6) battery percentage clamp service - the gauge over-reports right after a full charge (103 %); a root service
 #        overlays corrected capacity / energy_full sysfs values so Steam and the performance overlay stay at <= 100 %
+#     7) [EXPERIMENTAL, opt-in] gyroscope - ACPI override so the kernel sees the BMI260 + patched InputPlumber (Steam Deck gyro)
 # Usage:
 #   ./oxp3-apply-fixes.sh                apply (asks sudo password, prints the plan and confirms)
-#   ./oxp3-apply-fixes.sh --check        check only, changes nothing, needs no sudo (covers all six fixes)
-#   ./oxp3-apply-fixes.sh --revert       undo all six fixes (then reboot)
+#   ./oxp3-apply-fixes.sh --check        check only, changes nothing, needs no sudo (covers every fix, gyro included when enabled)
+#   ./oxp3-apply-fixes.sh --revert       undo every fix incl. gyro (then reboot)
 #   ./oxp3-apply-fixes.sh --mcu-restore  [DANGEROUS] raw-writes MCU button-table page 3 (Home/Xbox) to factory values, asks to confirm.
 #                                        Use ONLY if Home/Xbox are already dead. A wrong write can kill chassis keys for good and
 #                                        cannot be read back or verified. Normal users must NOT run this. No other option writes the MCU.
 #   flags: --yes no confirmation prompt | --force skip the device/OS guards | --force-nvme apply nvme.noacpi=1 on any SSD
 #          --no-wifi skip step 0 (Wi-Fi firmware)
+#          --gyro enable the experimental gyro step (remembered; later runs and OS-update re-runs keep it)
+#          --no-gyro switch the gyro step off and remove its files (remembered)
 # Idempotent: safe to run repeatedly.
 # ============================================================================
 set -euo pipefail
 
-MODE="apply"; FORCE=0; FORCE_NVME=0; ASSUME_YES=0; SKIP_WIFI=0
+MODE="apply"; FORCE=0; FORCE_NVME=0; ASSUME_YES=0; SKIP_WIFI=0; GYRO_REQ=""
 for a in "$@"; do
     case "$a" in
         --check) MODE="--check" ;;
@@ -71,8 +80,10 @@ for a in "$@"; do
         --force-nvme) FORCE_NVME=1 ;;  # apply nvme.noacpi=1 regardless of SSD model
         --yes|-y) ASSUME_YES=1 ;;      # no confirmation prompt
         --no-wifi) SKIP_WIFI=1 ;;      # skip step 0 (Wi-Fi firmware)
-        -h|--help) sed -n '2,50p' "$0" | grep -E '^#' | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) echo "unknown option: $a  (valid: --check | --revert | --mcu-restore | --force | --force-nvme | --no-wifi | --yes)"; exit 2 ;;
+        --gyro) GYRO_REQ=1 ;;          # enable the experimental gyro step (remembered)
+        --no-gyro) GYRO_REQ=0 ;;       # disable it and remove its files (remembered)
+        -h|--help) sed -n '2,/^set -euo pipefail/p' "$0" | grep -E '^#' | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "unknown option: $a  (valid: --check | --revert | --mcu-restore | --force | --force-nvme | --no-wifi | --gyro | --no-gyro | --yes)"; exit 2 ;;
     esac
 done
 # target user's home (real user when run via sudo)
@@ -95,6 +106,22 @@ BATT_SH="$USER_HOME/oxp3-fix/oxp3-battery-clamp.sh"          # in /home, survive
 BATT_UNIT=/etc/systemd/system/oxp3-battery-clamp.service
 IP_YAML=/etc/inputplumber/devices.d/50-onexplayer_3.yaml
 IP_CAPMAP=/etc/inputplumber/capability_maps.d/onexplayer_type3.yaml   # id oxp3: Home key -> Guide   # InputPlumber 0.78 override dir is devices.d
+# experimental gyro (step 7)
+GYRO_DIR="$USER_HOME/oxp3-fix"                               # in /home, survives updates
+GYRO_BIN="$GYRO_DIR/inputplumber-oxp3-gyro"                  # patched InputPlumber 0.78.0 (source: gyro/ in the repo)
+GYRO_LAUNCH="$GYRO_DIR/oxp3-inputplumber-launch.sh"          # starts GYRO_BIN, or the stock binary if GYRO_BIN cannot run
+GYRO_ON_FILE="$GYRO_DIR/gyro.enabled"                        # the user opted in
+GYRO_OFF_FILE="$GYRO_DIR/gyro.declined"                      # the user said no (do not ask again)
+GYRO_DROPIN=/etc/systemd/system/inputplumber.service.d/oxp3-gyro-fork.conf
+GYRO_CONF=/etc/inputplumber/oxp3-gyro-steer.conf             # tuning, hot-reloaded every 2 s, never overwritten once it exists
+ACPI_IMG=/boot/acpi_override.img
+GRUB_IMU_FILE=/etc/default/grub.d/oxp3-imu.cfg
+GYRO_BIOS="5.09"                                             # the ACPI override is a patched copy of this BIOS's SSDT26
+GYRO_IP_SERIES="0.78"                                        # the patched build is InputPlumber 0.78.0
+GYRO_BIN_SHA256="1107d95c34863c7865cac64183673135098d77265a32763c22fc7efbc1893aa3"
+GYRO_BIN_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/v1.5.0/inputplumber-oxp3-gyro"
+ACPI_IMG_SHA256="0e9b716e65978ac7365fda6fddf476a18b352a2d1ed98f4f30c8d3f8558b2113"
+ACPI_IMG_OLD_SHA256="2d1a0a88e4cfe694cd4edc9b0d0a5e28f7f3f5bb9ccdcf7cbf1d5d01a02d42ad"   # earlier build of the same table (long cpio member name)
 
 # ---- desired contents ------------------------------------------
 GRUB_D_CONTENT=$(cat <<'EOT'
@@ -572,6 +599,144 @@ EOT
 VOLKEY_UNIT_CONTENT="${VOLKEY_UNIT_CONTENT//__VOLKEY_PY__/$VOLKEY_PY}"
 BATT_UNIT_CONTENT="${BATT_UNIT_CONTENT//__BATT_SH__/$BATT_SH}"
 
+# ---- experimental gyro (step 7) contents ------------------------------
+GRUB_IMU_CONTENT=$(cat <<'EOT'
+# ACPI table override for the gyroscope (experimental): renames the IMU node so the kernel's bmi270 driver binds.
+# Revert: ./oxp3-apply-fixes.sh --no-gyro   (or rm this file and /boot/acpi_override.img, then run update-grub)
+GRUB_EARLY_INITRD_LINUX_CUSTOM="acpi_override.img"
+EOT
+)
+
+GYRO_LAUNCH_CONTENT=$(cat <<'EOT'
+#!/bin/sh
+# Starts the OXP3 gyro build of InputPlumber (systemd drop-in oxp3-gyro-fork.conf). If that binary cannot run (a library it needs
+# is gone after an OS update) or the stock InputPlumber is no longer the 0.78 series it was built from, the stock binary starts instead,
+# so the gamepad never depends on the experimental build.
+B=__GYRO_BIN__
+STOCK=/usr/bin/inputplumber
+case "$($STOCK --version 2>/dev/null)" in
+    *" __GYRO_IP_SERIES__."*)
+        if [ -x "$B" ] && ! ldd "$B" 2>&1 | grep -q 'not found'; then exec "$B"; fi ;;
+esac
+echo "oxp3: gyro InputPlumber build unusable here, starting the stock inputplumber" >&2
+exec "$STOCK"
+EOT
+)
+
+GYRO_DROPIN_CONTENT=$(cat <<'EOT'
+# OXP3 gyro (experimental): run the patched InputPlumber through a launcher that falls back to the stock binary.
+# Revert: ./oxp3-apply-fixes.sh --no-gyro
+[Service]
+ExecStart=
+ExecStart=__GYRO_LAUNCH__
+EOT
+)
+
+GYRO_CONF_CONTENT=$(cat <<'EOT'
+# OXP3 gyro drift handling (InputPlumber fork, deck-uhid target). Re-read every 2 s, no restart needed.
+enabled=1
+mode=gyro         # gyro: shape the yaw rate sent to Steam (Steam's own gyro layout keeps working)
+                  # stick: map the angle to the left stick X instead
+tau=20            # seconds: Steam's integrated angle relaxes toward centre with this time constant
+                  # (a 0.08 deg/s bias then stays a ~1.6 deg offset instead of drifting; long held turns relax slowly)
+bias_auto=1       # learn the gyro bias while the device rests (2 s still windows)
+bias_gyro_ptp=0.6 # deg/s: max gyro span for a window to count as still
+bias_accel_ptp=0.02 # g: max accelerometer span for a window to count as still
+# response shaping (gyro mode): Steam's integrated angle = gain * curve(physical angle)
+range=45          # deg: knee of the curve; below it small tilts are boosted, above it the response flattens
+curve=0.5         # 0 = linear; 0.5 = 1.5x near centre tapering to 0.5x at `range` (max 0.95)
+gain=0.85         # overall multiplier (lower = calmer at large angles)
+# stick mode only
+max_angle=25
+deadzone=1.5
+accel_gain=2.0
+smooth_hz=8
+invert=0
+upright_min=0.6
+EOT
+)
+
+# extra keys for the IMU source in the InputPlumber yaml (only understood by the patched build)
+IP_YAML_GYRO_MARK='      name: "{i2c-BMI0160:00,bmi260,bmi160}"'
+IP_YAML_GYRO_EXTRA=$(cat <<'EOT'
+      sample_rate: 400
+      # Gyro bias compensation is available (deg/s, sensor frame) but left OFF: Steam estimates the gyro bias of a
+      # Steam Deck controller itself, and our compensation fought with it (centre wandered 2-3 deg in Forza, 2026-09-19).
+      gyro_bias: [0, 0, 0]
+      gyro_auto_calibrate: false
+      # Sensor -> Steam Deck frame (right, top edge, out of screen); the forked bmi_imu.rs then orders the gyro
+      # fields the way SDL_hidapi_steamdeck.c reads them. Pose test 2026-09-19: flat screen-up sensor z=-9.8
+      # (z into the screen), kickstand sensor x<0 (x toward the bottom edge), left edge raised sensor y>0 (y to the left).
+      mount_matrix:
+        x: [0, -1, 0]
+        y: [-1, 0, 0]
+        z: [0, 0, -1]
+      # Accelerometer bias (m/s^2, sensor frame) from the flat / rotated-180-degrees pair on 2026-09-19:
+      # Deck-frame readings x=+163 y=-822 LSB in both orientations -> table tilt cancels, this is sensor offset.
+      accel_bias: [0.503, -0.100, 0]
+EOT
+)
+IP_YAML_CONTENT_BASE="$IP_YAML_CONTENT"
+set_gyro_yaml() { IP_YAML_CONTENT="${IP_YAML_CONTENT_BASE/"$IP_YAML_GYRO_MARK"/"$IP_YAML_GYRO_MARK"$'\n'"$IP_YAML_GYRO_EXTRA"}"; }
+set_base_yaml() { IP_YAML_CONTENT="$IP_YAML_CONTENT_BASE"; }
+
+# The ACPI override: a cpio image (kernel/firmware/acpi/ssdt-oxp3-imu.aml) holding this BIOS's SSDT26 (Rtd3 I2C_DEVT) with the IMU node
+# renamed 10EC5280 -> BMI0260 (source: gyro/SSDT26-oxp3-imu.dsl). gzip + base64.
+ACPI_IMG_B64=$(cat <<'EOT'
+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
+UQAA
+EOT
+)
+GYRO_LAUNCH_CONTENT="${GYRO_LAUNCH_CONTENT//__GYRO_BIN__/$GYRO_BIN}"
+GYRO_LAUNCH_CONTENT="${GYRO_LAUNCH_CONTENT//__GYRO_IP_SERIES__/$GYRO_IP_SERIES}"
+GYRO_DROPIN_CONTENT="${GYRO_DROPIN_CONTENT//__GYRO_LAUNCH__/$GYRO_LAUNCH}"
+
 # ---- helpers ------------------------------------------------------
 say()  { printf '%s\n' "$*"; }
 hdr()  { printf '\n== %s ==\n' "$*"; }
@@ -617,6 +782,53 @@ OXP_M2="$(cat "$OXP_DEV/button_m2" 2>/dev/null || echo '-')"
 paddles_ok() { [ -n "$OXP_DEV" ] && [ "$OXP_MODE" = xinput ] && [ "$OXP_M1" = KEY_F16 ] && [ "$OXP_M2" = KEY_F17 ]; }
 NVME_MODEL="$(cat /sys/class/nvme/nvme0/model 2>/dev/null | xargs || echo unknown)"
 
+# ---- experimental gyro: wanted? possible? ------------------------------
+IMU_ACTIVE=0; [ -e /sys/bus/i2c/devices/i2c-BMI0260:00 ] && IMU_ACTIVE=1     # the ACPI override is live in the running kernel
+BIOS_VER="$(cat /sys/class/dmi/id/bios_version 2>/dev/null || true)"
+IP_VER="$(/usr/bin/inputplumber --version 2>/dev/null | awk '{print $2}' || true)"
+# prints why the gyro step cannot be used here (nothing when it can)
+gyro_block_reason() {
+    if [ "$FORCE" = 1 ]; then return 0; fi
+    if [ "$BIOS_VER" != "$GYRO_BIOS" ]; then echo "BIOS is '${BIOS_VER:-?}', the ACPI override only matches BIOS $GYRO_BIOS (--force overrides)"; return 0; fi
+    if ! have_ip; then echo "InputPlumber is not installed"; return 0; fi
+    case "$IP_VER" in "$GYRO_IP_SERIES".*) ;; *) echo "InputPlumber is '${IP_VER:-?}', the patched build is for the $GYRO_IP_SERIES series (--force overrides)"; return 0 ;; esac
+}
+GYRO_WANT=0
+if [ "$GYRO_REQ" = 1 ]; then GYRO_WANT=1
+elif [ "$GYRO_REQ" = 0 ]; then GYRO_WANT=0
+elif [ -f "$GYRO_ON_FILE" ] || [ -f "$GYRO_DROPIN" ]; then GYRO_WANT=1; fi     # opted in earlier (or installed by hand)
+GYRO_BLOCK="$(gyro_block_reason)"
+GYRO_ON=0; GYRO_DECLINED=0
+if [ "$GYRO_WANT" = 1 ] && [ -z "$GYRO_BLOCK" ]; then GYRO_ON=1; set_gyro_yaml; fi
+gyro_bin_ok() { [ -f "$GYRO_BIN" ] && [ "$(sha256sum "$GYRO_BIN" | cut -d' ' -f1)" = "$GYRO_BIN_SHA256" ]; }
+acpi_img_sha() { sha256sum "$ACPI_IMG" 2>/dev/null | cut -d' ' -f1 || true; }
+gyro_installed() { [ -f "$GYRO_DROPIN" ] || [ -f "$GYRO_LAUNCH" ] || [ -f "$GYRO_BIN" ] || [ -f "$GYRO_CONF" ] || [ -f "$GRUB_IMU_FILE" ] || [ -f "$GYRO_ON_FILE" ] \
+    || [ "$(acpi_img_sha)" = "$ACPI_IMG_SHA256" ] || [ "$(acpi_img_sha)" = "$ACPI_IMG_OLD_SHA256" ]; }
+sudo_put() { # sudo_put <file> <content>: write as root when it differs; returns 1 when unchanged
+    if same_content "$1" "$2"; then say "  [skip] $1 unchanged"; return 1; fi
+    sudo mkdir -p "$(dirname "$1")"; printf '%s\n' "$2" | sudo tee "$1" >/dev/null; say "  [write] $1"; return 0
+}
+# take every gyro file away again (the grub reference goes before the image, so the boot menu never points at a missing file)
+remove_gyro() {
+    local _cur
+    if [ -f "$GYRO_DROPIN" ]; then
+        sudo rm -f "$GYRO_DROPIN"; sudo rmdir "$(dirname "$GYRO_DROPIN")" 2>/dev/null || true; sudo systemctl daemon-reload
+        say "  [remove] $GYRO_DROPIN (InputPlumber is the stock binary again)"; IP_RESTART=1; CHANGED=1
+    fi
+    for _f in "$GYRO_LAUNCH" "$GYRO_BIN" "$GYRO_BIN.part"; do [ -f "$_f" ] && { rm -f "$_f"; say "  [remove] $_f"; }; done
+    if [ -f "$GYRO_CONF" ]; then sudo rm -f "$GYRO_CONF"; say "  [remove] $GYRO_CONF"; fi
+    if [ -f "$GRUB_IMU_FILE" ]; then
+        sudo rm -f "$GRUB_IMU_FILE"; say "  [remove] $GRUB_IMU_FILE"; sudo update-grub; CHANGED=1
+    fi
+    _cur="$(acpi_img_sha)"
+    if [ -n "$_cur" ] && { [ "$_cur" = "$ACPI_IMG_SHA256" ] || [ "$_cur" = "$ACPI_IMG_OLD_SHA256" ]; }; then
+        if sudo grep -q 'acpi_override.img' "$EFI_GRUB_CFG" 2>/dev/null; then sudo update-grub; fi
+        sudo rm -f "$ACPI_IMG"; say "  [remove] $ACPI_IMG"; CHANGED=1
+        [ "$IMU_ACTIVE" = 1 ] && NEED_REBOOT=1
+    fi
+    return 0
+}
+
 # ---- a. current state ------------------------------------------
 hdr "Current state  (oxp3-steamos-fixes $OXP3_FIXES_VERSION)"
 say "  device: $DMI_VENDOR $DMI_PRODUCT ; SteamOS $OS_BUILD ; kernel $KVER ; NVMe: $NVME_MODEL"
@@ -637,6 +849,13 @@ BAT_SYS=/sys/class/power_supply/BAT0
 if [ -r "$BAT_SYS/energy_now" ]; then
     say "  battery gauge : energy_now=$(cat "$BAT_SYS/energy_now") energy_full=$(cat "$BAT_SYS/energy_full" | tr -d ' ') capacity=$(cat "$BAT_SYS/capacity" | tr -d ' ')%   ($(findmnt -T "$BAT_SYS/capacity" -n -o SOURCE 2>/dev/null | grep -q oxp3-battery && echo "overlay active" || echo "raw kernel values"))"
     if systemctl is-active -q oxp3-battery-clamp.service 2>/dev/null; then say "  battery clamp service oxp3-battery-clamp : active"; else say "  battery clamp service oxp3-battery-clamp : inactive/missing"; fi
+fi
+if [ "$GYRO_ON" = 1 ]; then
+    say "  gyro (experimental) : enabled ; IMU $([ "$IMU_ACTIVE" = 1 ] && echo "visible to the kernel (ACPI override active)" || echo "NOT visible yet (ACPI override not loaded: reboot needed)") ; patched InputPlumber $(gyro_bin_ok && echo present || echo missing)"
+elif [ "$GYRO_WANT" = 1 ]; then
+    say "  gyro (experimental) : wanted but unavailable - $GYRO_BLOCK"
+else
+    say "  gyro (experimental) : not enabled (opt in with --gyro)"
 fi
 if [ -n "$OXP_DEV" ]; then
     say "  hid-oxp MCU driver (paddles) : $(basename "$OXP_DEV") gamepad_mode=$OXP_MODE button_m1=$OXP_M1 button_m2=$OXP_M2   expected xinput / KEY_F16 / KEY_F17"
@@ -688,6 +907,17 @@ if [ "$MODE" = "--check" ]; then
     same_content "$IP_YAML" "$IP_YAML_CONTENT" || { say "  [diff] IP yaml missing or differs"; ok=0; }
     same_content "$IP_CAPMAP" "$IP_CAPMAP_CONTENT" || { say "  [diff] IP capability map missing or differs"; ok=0; }
     systemctl is-enabled -q inputplumber.service 2>/dev/null || { say "  [diff] inputplumber.service not enabled"; ok=0; }
+    if [ "$GYRO_ON" = 1 ]; then
+        gyro_bin_ok || { say "  [diff] patched InputPlumber missing or differs (apply downloads it)"; ok=0; }
+        same_content "$GYRO_LAUNCH" "$GYRO_LAUNCH_CONTENT" || { say "  [diff] gyro launcher missing or differs"; ok=0; }
+        same_content "$GYRO_DROPIN" "$GYRO_DROPIN_CONTENT" || { say "  [diff] gyro systemd drop-in missing or differs"; ok=0; }
+        [ -f "$GYRO_CONF" ] || { say "  [diff] $GYRO_CONF missing"; ok=0; }
+        [ "$(acpi_img_sha)" = "$ACPI_IMG_SHA256" ] || { say "  [diff] $ACPI_IMG missing or differs"; ok=0; }
+        same_content "$GRUB_IMU_FILE" "$GRUB_IMU_CONTENT" || { say "  [diff] $GRUB_IMU_FILE missing or differs"; ok=0; }
+        [ "$IMU_ACTIVE" = 1 ] || { say "  [diff] the IMU is not visible to the running kernel (ACPI override not loaded)"; ok=0; }
+    elif [ "$GYRO_WANT" = 1 ]; then
+        say "  [info] gyro is wanted but cannot be used here: $GYRO_BLOCK"
+    fi
     if [ -z "$OXP_DEV" ]; then say "  [diff] hid-oxp not bound, paddles will be silent"; ok=0;
     elif ! paddles_ok; then say "  [diff] paddle driver state differs (apply re-asserts via sysfs)"; ok=0; fi
     if nvme_bug_present && [ "$CMD_OK" != 1 ]; then say "  [diff] kernel not running with nvme.noacpi=1"; ok=0; fi
@@ -747,6 +977,8 @@ if [ "$MODE" = "--revert" ]; then
     sudo -v
     if [ -f "$GRUB_D_FILE" ]; then sudo rm -f "$GRUB_D_FILE"; say "  removed $GRUB_D_FILE"; sudo update-grub; NEED_REBOOT=1; fi
     if [ -f "$MODPROBE_FILE" ]; then sudo rm -f "$MODPROBE_FILE"; say "  removed $MODPROBE_FILE"; NEED_REBOOT=1; fi
+    if gyro_installed; then remove_gyro; fi
+    rm -f "$GYRO_ON_FILE" "$GYRO_OFF_FILE"
     if [ -f "$IP_CAPMAP" ]; then sudo rm -f "$IP_CAPMAP"; say "  removed $IP_CAPMAP"; fi
     if [ -f "$IP_YAML" ]; then sudo systemctl disable --now inputplumber.service 2>/dev/null || true; sudo rm -f "$IP_YAML"; say "  InputPlumber disabled and OXP3 config removed (gamepad back to plain xpad)"; fi
     if [ -f "$VOLKEY_UNIT" ]; then sudo systemctl disable --now oxp3-volkey-fix.service 2>/dev/null || true; sudo rm -f "$VOLKEY_UNIT"; sudo systemctl daemon-reload; say "  oxp3-volkey-fix.service stopped and removed (volume keys back to raw EC behavior)"; fi
@@ -765,6 +997,18 @@ if [ "$MODE" != "apply" ]; then
 fi
 
 # ---- apply --------------------------------------------------------------
+if [ "$GYRO_REQ" = "" ] && [ "$GYRO_ON" = 0 ] && [ "$GYRO_WANT" = 0 ] && [ -z "$GYRO_BLOCK" ] && [ ! -f "$GYRO_OFF_FILE" ] && [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then
+    say ""
+    say "  Optional, EXPERIMENTAL: gyroscope. The kernel cannot see this device's Bosch BMI260 on its own. Enabling this installs"
+    say "  an ACPI table override (needs a reboot) and swaps InputPlumber for a patched build from the project's GitHub release"
+    say "  (sha256-checked; it falls back to the stock binary automatically if it cannot run). Steam's gyro settings then work."
+    say "  Drift is reduced but not eliminated. Undo any time with: $0 --no-gyro"
+    read -r -p "  Enable the experimental gyro support? (y/N) " _ans
+    case "$_ans" in
+        y|Y) GYRO_REQ=1; GYRO_WANT=1; GYRO_ON=1; set_gyro_yaml ;;
+        *) GYRO_DECLINED=1 ;;
+    esac
+fi
 hdr "Applying fixes (will ask for sudo password)"
 say "  will check and write as needed:"
 if [ "$SKIP_WIFI" = 1 ]; then
@@ -779,6 +1023,15 @@ say "   4) $VOLKEY_PY + $VOLKEY_UNIT (volume-key fix)   $(have_evdev && echo "[p
 say "   5) $IP_YAML + $IP_CAPMAP + enable inputplumber   $(have_ip && echo "[inputplumber OK]" || echo "[SKIPPED: inputplumber missing]")"
 say "      + paddle driver state: hid-oxp gamepad_mode=xinput, button_m1/m2=KEY_F16/KEY_F17   $([ -n "$OXP_DEV" ] && echo "[hid-oxp OK]" || echo "[SKIPPED: hid-oxp not bound]")"
 say "   6) $BATT_SH + $BATT_UNIT (battery percentage clamp)   $([ -r /sys/class/power_supply/BAT0/energy_now ] && echo "[battery OK]" || echo "[SKIPPED: no energy_* battery]")"
+if [ "$GYRO_REQ" = 0 ]; then
+    say "   7) gyro (experimental): REMOVE the ACPI override, the patched InputPlumber and its files (--no-gyro)"
+elif [ "$GYRO_ON" = 1 ]; then
+    say "   7) gyro (experimental): $ACPI_IMG + $GRUB_IMU_FILE (ACPI override, update-grub), patched InputPlumber $(gyro_bin_ok && echo "[present]" || echo "[will be downloaded, 10 MB]") + $GYRO_DROPIN"
+elif [ "$GYRO_WANT" = 1 ]; then
+    say "   7) gyro (experimental): [SKIPPED: $GYRO_BLOCK]"
+else
+    say "   7) gyro (experimental): not enabled (opt in with --gyro)"
+fi
 if [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then read -r -p "  Continue? (y/N) " _ans; case "$_ans" in y|Y) ;; *) say "  cancelled."; exit 0 ;; esac; fi
 sudo -v
 
@@ -955,6 +1208,76 @@ elif [ "$VOLKEY_RESTART" = 1 ]; then
     say "  volkey files updated: reboot to apply"
     NEED_REBOOT=1
 fi
+fi
+
+# e2b. gyroscope (EXPERIMENTAL, opt-in; runs before e3 because the InputPlumber yaml and restart below depend on it)
+mkdir -p "$GYRO_DIR"
+if [ "$GYRO_REQ" = 0 ]; then
+    if gyro_installed; then say "  [gyro] removing the experimental gyro support (--no-gyro)"; remove_gyro; else say "  [skip] gyro: nothing installed"; fi
+    rm -f "$GYRO_ON_FILE"; : > "$GYRO_OFF_FILE"
+elif [ "$GYRO_WANT" = 1 ] && [ -n "$GYRO_BLOCK" ]; then
+    say "  [skip] gyro (experimental): $GYRO_BLOCK"
+elif [ "$GYRO_ON" = 1 ]; then
+    GYRO_OK=1
+    # patched InputPlumber: keep the verified copy, otherwise download it from the release and check its sha256
+    if gyro_bin_ok; then
+        say "  [skip] $GYRO_BIN unchanged"
+    elif ! command -v curl >/dev/null 2>&1 || ! ip route 2>/dev/null | grep -q '^default'; then
+        say "  [error] gyro: the patched InputPlumber is not on this machine and there is no network to download it"; GYRO_OK=0
+    else
+        say "  [run] downloading the patched InputPlumber ($GYRO_BIN_URL, about 10 MB) ..."
+        if curl -fL --retry 3 --progress-bar -o "$GYRO_BIN.part" "$GYRO_BIN_URL" \
+            && [ "$(sha256sum "$GYRO_BIN.part" | cut -d' ' -f1)" = "$GYRO_BIN_SHA256" ]; then
+            mv -f "$GYRO_BIN.part" "$GYRO_BIN"; chmod +x "$GYRO_BIN"; say "  [write] $GYRO_BIN (sha256 verified)"; CHANGED=1; IP_RESTART=1
+        else
+            rm -f "$GYRO_BIN.part"; say "  [error] gyro: download failed or the sha256 does not match"; GYRO_OK=0
+        fi
+    fi
+    if [ "$GYRO_OK" = 1 ] && ldd "$GYRO_BIN" 2>&1 | grep -q 'not found'; then
+        say "  [error] gyro: the patched InputPlumber needs libraries this SteamOS build does not have:"; ldd "$GYRO_BIN" 2>&1 | grep 'not found'; GYRO_OK=0
+    fi
+    # ACPI override image (never replace an acpi_override.img that is not ours)
+    if [ "$GYRO_OK" = 1 ]; then
+        _cur="$(acpi_img_sha)"
+        if [ "$_cur" = "$ACPI_IMG_SHA256" ]; then
+            say "  [skip] $ACPI_IMG unchanged"
+        elif [ -n "$_cur" ] && [ "$_cur" != "$ACPI_IMG_OLD_SHA256" ]; then
+            say "  [error] gyro: $ACPI_IMG already exists and is not from this pack (sha256 ${_cur:0:12}...), not overwriting it"; GYRO_OK=0
+        else
+            _tmp="$(mktemp "${TMPDIR:-/tmp}/oxp3-acpi.XXXXXX")"
+            printf '%s' "$ACPI_IMG_B64" | base64 -d | gunzip > "$_tmp" 2>/dev/null || true
+            if [ "$(sha256sum "$_tmp" | cut -d' ' -f1)" = "$ACPI_IMG_SHA256" ] && sudo install -m 644 "$_tmp" "$ACPI_IMG"; then
+                say "  [write] $ACPI_IMG (ACPI override for the BMI260)"; CHANGED=1; GRUB_UPD=1
+            else
+                say "  [error] gyro: could not write the ACPI override image"; GYRO_OK=0
+            fi
+            rm -f "$_tmp"
+        fi
+    fi
+    if [ "$GYRO_OK" = 1 ]; then
+        GRUB_UPD="${GRUB_UPD:-0}"
+        if sudo_put "$GRUB_IMU_FILE" "$GRUB_IMU_CONTENT"; then CHANGED=1; GRUB_UPD=1; fi
+        if ! sudo grep -q 'acpi_override.img' "$EFI_GRUB_CFG" 2>/dev/null; then GRUB_UPD=1; fi
+        if [ "$GRUB_UPD" = 1 ]; then
+            say "  [run] update-grub -> $EFI_GRUB_CFG"; sudo update-grub
+            if sudo grep -q 'acpi_override.img' "$EFI_GRUB_CFG" 2>/dev/null; then say "  [verify] grub.cfg loads acpi_override.img OK"; else say "  [error] gyro: grub.cfg does not reference acpi_override.img"; GYRO_OK=0; fi
+        fi
+        [ "$IMU_ACTIVE" = 1 ] || NEED_REBOOT=1
+    fi
+    if [ "$GYRO_OK" = 1 ]; then
+        printf '%s\n' "$GYRO_LAUNCH_CONTENT" > "$GYRO_LAUNCH.new"; chmod +x "$GYRO_LAUNCH.new"
+        if [ -f "$GYRO_LAUNCH" ] && cmp -s "$GYRO_LAUNCH.new" "$GYRO_LAUNCH"; then rm -f "$GYRO_LAUNCH.new"; say "  [skip] $GYRO_LAUNCH unchanged"
+        else mv -f "$GYRO_LAUNCH.new" "$GYRO_LAUNCH"; say "  [write] $GYRO_LAUNCH"; CHANGED=1; IP_RESTART=1; fi
+        if sudo_put "$GYRO_DROPIN" "$GYRO_DROPIN_CONTENT"; then sudo systemctl daemon-reload; CHANGED=1; IP_RESTART=1; fi
+        if [ ! -f "$GYRO_CONF" ]; then sudo_put "$GYRO_CONF" "$GYRO_CONF_CONTENT" || true; CHANGED=1; else say "  [skip] $GYRO_CONF exists (your tuning is kept)"; fi
+        rm -f "$GYRO_OFF_FILE"; : > "$GYRO_ON_FILE"
+        say "  gyro (experimental) enabled$([ "$IMU_ACTIVE" = 1 ] || echo "; the IMU appears after the reboot")"
+    else
+        say "  gyro (experimental) NOT enabled: see the errors above; InputPlumber stays configured for the stock build."
+        set_base_yaml
+    fi
+else
+    if [ "$GYRO_DECLINED" = 1 ]; then : > "$GYRO_OFF_FILE"; fi
 fi
 
 # e3. InputPlumber: Home/Console/Keyboard keys + back paddles (L4/R4) + single virtual gamepad

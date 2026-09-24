@@ -3,7 +3,7 @@
 This repository covers everything needed to run SteamOS on the ONEXPLAYER 3, from a blank drive to a working machine:
 
 1. **Part 1** is a step-by-step guide to installing SteamOS with the recovery image.
-2. **Part 2** is a fix pack, one script that repairs what does not work out of the box: Wi-Fi, suspend/resume, the HDR panel and refresh rates, volume keys, the chassis keys and back paddles.
+2. **Part 2** is a fix pack, one script that repairs what does not work out of the box: Wi-Fi, suspend/resume, the HDR panel and refresh rates, volume keys, the chassis keys and back paddles, the battery percentage, and (experimental, opt-in) the gyroscope.
 
 ## Part 1 - Installing SteamOS
 
@@ -73,24 +73,31 @@ This is the recovery-image method that works on this machine. You need a Windows
 | **Home, Console and Keyboard keys do nothing** | These keys are reported through the MCU keyboard and vendor interfaces | An InputPlumber composite device plus capability map: Home to Steam menu, Console to Quick Access, Keyboard to the on-screen keyboard |
 | **Battery shows 101-104 %** after a full charge (Steam UI and performance overlay) | The gauge reports `energy_now` above its own `energy_full` (92.2 vs 89.9 Wh, design 84.5 Wh). The ACPI battery driver only clamps when `energy_full` is below the design value, so `capacity` becomes 103; upower clamps, but Steam reads the sysfs value through its bundled SDL3 and the overlay divides `energy_now` by `energy_full` itself | `oxp3-battery-clamp.service`, a root service that bind-mounts corrected `capacity` and `energy_full` files over the two sysfs attributes (`energy_full` = the larger of the kernel value and the highest `energy_now` seen), refreshed once a minute. Nothing else is touched; `--revert` unmounts and removes it |
 | **Back paddles M1 and M2 do not work** | They need the hid-oxp driver to map them and switch the MCU report mode | hid-oxp maps M1 and M2 to `KEY_F16` and `KEY_F17` and cycles the report mode at boot. The MCU then emits vendor frames that InputPlumber decodes as the left and right paddle. On the OXP3 the physical left paddle is `0x22`, so the left/right swap inherited from the OneXPlayer 8 map was removed. The script only re-asserts the driver state through sysfs |
+| **No gyroscope** (experimental, opt-in with `--gyro`) | The IMU is a Bosch BMI260, but its ACPI node is named `10EC5280`, which only the `bmi160` driver claims, and that driver fails with `Error reading chip id` (-121); nothing is left for InputPlumber or Steam to read | An ACPI table override renames the node to `BMI0260` so `bmi270_i2c` binds (BIOS 5.09 only), and a patched InputPlumber 0.78.0 feeds the virtual Steam Deck controller with corrected axes and a drift-relaxing response curve. Drift is reduced, not eliminated. Nothing is installed unless you opt in; `--no-gyro` removes it. Details, files and build instructions in [`gyro/`](gyro/README.md) |
 
 ### Installing and running the fix pack
 
+You do not need to clone the repository: the script is self-contained (the volume-key and battery helpers are embedded in it). Download it from the latest release on the deck and run it:
+
 ```bash
-mkdir -p ~/oxp3-fix && cp oxp3-apply-fixes.sh oxp3-volkey-fix.py ~/oxp3-fix/ && chmod +x ~/oxp3-fix/oxp3-apply-fixes.sh
-cp OXP3-*.desktop ~/Desktop/ && chmod +x ~/Desktop/OXP3-*.desktop   # optional desktop icons
-~/oxp3-fix/oxp3-apply-fixes.sh --check     # dry check, no sudo, changes nothing
-~/oxp3-fix/oxp3-apply-fixes.sh             # apply: asks for the sudo password, confirms, says if a reboot is needed
-~/oxp3-fix/oxp3-apply-fixes.sh --revert    # undo everything, then reboot
+mkdir -p ~/oxp3-fix && cd ~/oxp3-fix
+curl -fLO https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/latest/download/oxp3-apply-fixes.sh
+chmod +x oxp3-apply-fixes.sh
+./oxp3-apply-fixes.sh --check     # dry check, no sudo, changes nothing
+./oxp3-apply-fixes.sh             # apply: asks for the sudo password, confirms, says if a reboot is needed
+./oxp3-apply-fixes.sh --revert    # undo everything, then reboot
 ```
 
-Flags: `--yes`, `--force`, `--force-nvme`, `--no-wifi`.
+Optional desktop icons (`OXP3-Fix.desktop`, `OXP3-Revert.desktop`) are attached to the release too: copy them to `~/Desktop` and `chmod +x` them. With a clone of the repository the same works from the checkout: `cp oxp3-apply-fixes.sh ~/oxp3-fix/`.
+
+Flags: `--yes`, `--force`, `--force-nvme`, `--no-wifi`, `--gyro`, `--no-gyro`.
 
 - SteamOS updates may make the root filesystem read-only again, reset `/etc` and remove installed packages. Re-run the script afterwards; it is idempotent. If the filesystem is read-only, the script runs `steamos-readonly disable` first.
 - On a machine without working Wi-Fi, connect USB Ethernet or USB tethering before running the script, so the script can download `linux-firmware-intel`. Without any network the step is skipped with a message and the other fixes still run. A reboot is needed afterwards so the driver loads the new firmware.
 - Remove earlier hacks of your own first, such as boot-time `chvt` scripts or a masked `powerbuttond`, because they can interfere.
 - Do not unbind or rebind hid-oxp, and do not write raw commands to the `1a86:fe00` hidraw device.
 - After enabling InputPlumber mid-session, the controller page in Steam may need `sudo systemctl restart inputplumber` or a Steam restart before it shows the controller.
+- **Gyroscope is opt-in.** In an interactive run the script asks once whether to enable it (`--gyro` enables without asking, `--no-gyro` removes it and stops asking). It installs an ACPI override (reboot needed the first time) and downloads a 10 MB patched InputPlumber from the release, checking a pinned sha256. It only applies on BIOS 5.09 with stock InputPlumber 0.78.x, otherwise it says why and skips. The choice is remembered, so re-running after a SteamOS update restores it. The patched build is started through a launcher that falls back to the stock binary if it cannot run, so a bad update cannot take the gamepad with it. See [`gyro/README.md`](gyro/README.md) for tuning (`/etc/inputplumber/oxp3-gyro-steer.conf`) and how to build the binary yourself.
 - The volume key fix grabs the i8042 keyboard exclusively and forwards every key, including power, through a virtual device. Keep that in mind if you attach an external PS/2 keyboard.
 - Everything is written under `/etc` and `/home`, and `--revert` undoes it.
 
@@ -100,9 +107,9 @@ The fix pack does not touch lighting: the kernel hid-oxp LED interface has no ef
 
 ### Known issues and limitations
 
-As of 2026-09-22 these fixes have been in daily use for about half a month, including across the 20260921.1000 SteamOS update (re-run the script after an update). Only the gyroscope is known not to work, and no other stability problems have been seen apart from the rare speaker case below.
+As of 2026-09-24 the stable fixes have been in daily use for about half a month, including across the 20260921.1000 SteamOS update (re-run the script after an update). Apart from the gyroscope below, the only known issue is the rare speaker case.
 
-- **Gyroscope: recognized, but severe drift.** The sensor is a Bosch BMI260 that the kernel does not identify on its own. An ACPI table override makes it probe and deliver data, and with corrected units, axis order and mount matrix the direction is right. Flat-steering use still drifts by several degrees per minute, because the temperature-dependent bias about the vertical axis cannot be corrected with gravity. Static compensation, automatic calibration and no compensation were all tried without a usable result. This pack does not enable the gyroscope. See `issues/03-bmi160.md`.
+- **Gyroscope (experimental, opt-in): usable, but drift is only reduced.** The BMI260's temperature-dependent bias about the vertical axis cannot be corrected with gravity, so flat-steering use would drift by several degrees per minute. The patched InputPlumber makes Steam's integrated angle relax towards the centre with a 20 s time constant, so a constant bias ends up as a bounded offset of about 1-2 degrees instead of a runaway, at the cost of a slow return when you hold a turn for a long time. Static compensation and automatic calibration on their own were tried without a usable result. The response curve is tuned for gyro-to-joystick steering and may need adjusting (`curve`, `gain`) for other layouts. See [`gyro/README.md`](gyro/README.md) and `issues/03-bmi160.md`.
 - **Volume key root cause** is in the embedded controller firmware. A firmware update from the vendor would remove the need for the forwarder.
 - **HDR uses the gamma-2.2 path.** A true PQ path (`xe.enable_dpcd_backlight=1`) has not been tested.
 - **Speakers are very occasionally silent after boot.** A reboot fixes it. Not investigated yet.
@@ -112,7 +119,7 @@ Upstream bug drafts are in `issues/`.
 
 ### Tested configuration
 
-SteamOS 3.10 main 20260827.1000, kernel 7.2.0-valve1-1-neptune-72 (paddles verified on 7.2.4-valve1), OXP3 BIOS 5.09, panel SDC AMS881KB01-0, SSD Predator GM7 1TB. The script refuses to run on other DMI or OS values (`--force` overrides) and only applies `nvme.noacpi=1` when a GM7 / `1dee:1602` SSD is present (`--force-nvme` overrides).
+SteamOS 3.10 main 20260827.1000, kernel 7.2.0-valve1-1-neptune-72 (paddles, Wi-Fi/Bluetooth firmware, battery clamp and gyro verified on 7.2.4-valve1 / SteamOS 20260921.1000), OXP3 BIOS 5.09, panel SDC AMS881KB01-0, SSD Predator GM7 1TB. The script refuses to run on other DMI or OS values (`--force` overrides) and only applies `nvme.noacpi=1` when a GM7 / `1dee:1602` SSD is present (`--force-nvme` overrides). The gyro step additionally requires BIOS 5.09 and InputPlumber 0.78.x (`--force` overrides).
 
 ### How it was found
 
@@ -120,6 +127,7 @@ Suspend/resume failures were reproduced 7 out of 7 times with `rtcwake`-timed su
 
 ### Changelog
 
+- **v1.5.0 (2026-09-24)**: experimental, opt-in gyroscope support (step 7, `--gyro` / `--no-gyro`): ACPI override so the kernel sees the BMI260, patched InputPlumber 0.78.0 (source and build notes in `gyro/`, binary in the release, sha256 pinned, automatic fallback to the stock binary), and a drift-relaxing response curve. The script is now distributed as a release asset, so cloning the repository is not needed. `--help` now prints the complete usage text.
 - **v1.4.0 (2026-09-22)**: battery percentage clamp (step 6). The gauge over-reports right after a full charge and Steam showed 101-104 %; a small root service overlays corrected `capacity` / `energy_full` sysfs values, refreshed once a minute.
 - **v1.3.1 (2026-09-22)**: the Wi-Fi/Bluetooth step really installs the BE201 firmware: SteamOS' own `linux-firmware-neptune` satisfies the package check but lacks the files, so the step now looks at the driver state and extracts only the missing families from `linux-firmware-intel`.
 - **v1.3.0 (2026-09-20)**: step 0, Wi-Fi firmware on a fresh install (`--no-wifi` skips it).

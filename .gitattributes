@@ -5,3 +5,5 @@
 *.service text eol=lf
 *.yaml text eol=lf
 *.md text eol=lf
+gyro/*.patch -text
+*.dsl text eol=lf
