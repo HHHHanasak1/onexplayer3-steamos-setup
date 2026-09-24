@@ -77,18 +77,16 @@ This is the recovery-image method that works on this machine. You need a Windows
 
 ### Installing and running the fix pack
 
-Download it from the latest release on the deck and run it:
+Everything comes as one archive, `oxp3-fix.tar.gz`, from the latest release. On the deck:
 
 ```bash
-mkdir -p ~/oxp3-fix && cd ~/oxp3-fix
-curl -fLO https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/latest/download/oxp3-apply-fixes.sh
-chmod +x oxp3-apply-fixes.sh
-./oxp3-apply-fixes.sh --check     # dry check, no sudo, changes nothing
-./oxp3-apply-fixes.sh             # apply: asks for the sudo password, confirms, says if a reboot is needed
-./oxp3-apply-fixes.sh --revert    # undo everything, then reboot
+cd ~ && curl -fL https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/latest/download/oxp3-fix.tar.gz | tar -xz
+~/oxp3-fix/oxp3-apply-fixes.sh --check     # dry check, no sudo, changes nothing
+~/oxp3-fix/oxp3-apply-fixes.sh             # apply: asks for the sudo password, confirms, says if a reboot is needed
+~/oxp3-fix/oxp3-apply-fixes.sh --revert    # undo everything, then reboot
 ```
 
-Optional desktop icons (`OXP3-Fix.desktop`, `OXP3-Revert.desktop`) are attached to the release too: copy them to `~/Desktop` and `chmod +x` them. With a clone of the repository the same works from the checkout: `cp oxp3-apply-fixes.sh ~/oxp3-fix/`.
+The archive extracts to `~/oxp3-fix` (the fix pack script, the patched InputPlumber used by the optional gyro step, its source patch, and the desktop icons). Extracting a newer release over it updates it in place. Optional desktop icons: `cp ~/oxp3-fix/OXP3-*.desktop ~/Desktop/ && chmod +x ~/Desktop/OXP3-*.desktop`.
 
 Flags: `--yes`, `--force`, `--force-nvme`, `--no-wifi`, `--gyro`, `--no-gyro`.
 
@@ -97,7 +95,7 @@ Flags: `--yes`, `--force`, `--force-nvme`, `--no-wifi`, `--gyro`, `--no-gyro`.
 - Remove earlier hacks of your own first, such as boot-time `chvt` scripts or a masked `powerbuttond`, because they can interfere.
 - Do not unbind or rebind hid-oxp, and do not write raw commands to the `1a86:fe00` hidraw device.
 - After enabling InputPlumber mid-session, the controller page in Steam may need `sudo systemctl restart inputplumber` or a Steam restart before it shows the controller.
-- **Gyroscope is opt-in.** In an interactive run the script asks once whether to enable it (`--gyro` enables without asking, `--no-gyro` removes it and stops asking). It installs an ACPI override (reboot needed the first time) and downloads a 10 MB patched InputPlumber from the release, checking a pinned sha256. It only applies on BIOS 5.09 with stock InputPlumber 0.78.x, otherwise it says why and skips. The choice is remembered, so re-running after a SteamOS update restores it. The patched build is started through a launcher that falls back to the stock binary if it cannot run, so a bad update cannot take the gamepad with it. See [`gyro/README.md`](gyro/README.md) for tuning (`/etc/inputplumber/oxp3-gyro-steer.conf`) and how to build the binary yourself.
+- **Gyroscope is opt-in.** In an interactive run the script asks once whether to enable it (`--gyro` enables without asking, `--no-gyro` removes it and stops asking). It installs an ACPI override (reboot needed the first time) and uses the patched InputPlumber from the release archive, checking a pinned sha256. It only applies on BIOS 5.09 with stock InputPlumber 0.78.x, otherwise it says why and skips. The choice is remembered, so re-running after a SteamOS update restores it. The patched build is started through a launcher that falls back to the stock binary if it cannot run, so a bad update cannot take the gamepad with it. See [`gyro/README.md`](gyro/README.md) for tuning (`/etc/inputplumber/oxp3-gyro-steer.conf`) and how to build the binary yourself.
 - The volume key fix grabs the i8042 keyboard exclusively and forwards every key, including power, through a virtual device. Keep that in mind if you attach an external PS/2 keyboard.
 - Everything is written under `/etc` and `/home`, and `--revert` undoes it.
 
@@ -127,6 +125,7 @@ Suspend/resume failures were reproduced 7 out of 7 times with `rtcwake`-timed su
 
 ### Changelog
 
+- **v1.5.1 (2026-09-25)**: the release is a single archive, `oxp3-fix.tar.gz`, that extracts to `~/oxp3-fix`; the gyro step uses the patched InputPlumber from it.
 - **v1.5.0 (2026-09-24)**: experimental, opt-in gyroscope support (step 7, `--gyro` / `--no-gyro`): ACPI override so the kernel sees the BMI260, patched InputPlumber 0.78.0 (source and build notes in `gyro/`, binary in the release, sha256 pinned, automatic fallback to the stock binary), and a drift-relaxing rate filter. The script is now distributed as a release asset, so cloning the repository is not needed. `--help` now prints the complete usage text.
 - **v1.4.0 (2026-09-22)**: battery percentage clamp (step 6). The gauge over-reports right after a full charge and Steam showed 101-104 %; a small root service overlays corrected `capacity` / `energy_full` sysfs values, refreshed once a minute.
 - **v1.3.1 (2026-09-22)**: the Wi-Fi/Bluetooth step really installs the BE201 firmware: SteamOS' own `linux-firmware-neptune` satisfies the package check but lacks the files, so the step now looks at the driver state and extracts only the missing families from `linux-firmware-intel`.
