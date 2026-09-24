@@ -1,12 +1,15 @@
 #!/bin/bash
 # oxp3-steamos-fixes - ONEXPLAYER 3 (Intel Panther Lake) SteamOS fix pack
-# Version: v1.5.1 (2026-09-25)     License: MIT (see LICENSE)     Author: HANA & Claude
+# Version: v1.6.0 (2026-09-25)     License: MIT (see LICENSE)     Author: HANA & Claude
 # Tested on: SteamOS 3.10 main build 20260827.1000, kernel 7.2.0-valve1-1-neptune-72, OXP3 BIOS 5.09,
 #            panel Samsung SDC AMS881KB01-0, SSD Predator GM7 1TB (Biwin/Maxio 1dee:1602)
 # v1.1.0: gamescope HDR lua now also registers real 30-144Hz dynamic_modegen (this panel has genuine
 #         continuous VRR; the v1.0.1 lua declared dynamic_refresh_rates but never shipped the
 #         matching dynamic_modegen function, so no extra Hz options ever actually appeared in the
 #         Steam Performance panel's per-game refresh-rate selector).
+# v1.6.0: new step 8, TDP sync. The firmware leaves the MSR package PL1 (intel-rapl:0) at 25 W while TDP tools and the
+#         firmware only set the MMIO package PL1; the GPU obeys the MSR PL1, so it was throttled ("pl1") at ~33 W even with
+#         a 50 W TDP. A small root service copies the MMIO PL1 into the MSR PL1 whenever they differ.
 # v1.5.1: the release is one archive, oxp3-fix.tar.gz (extract it in ~ to get ~/oxp3-fix). The gyro step takes the patched
 #         InputPlumber from the archive next to the script and only downloads the archive when that copy is missing.
 # v1.5.0: new OPTIONAL, EXPERIMENTAL step 7, gyroscope (--gyro, or answer y when asked). The BMI260 IMU is invisible to the kernel
@@ -37,7 +40,7 @@
 #         the hid-oxp sysfs (driver pages 1-2 only, never raw hidraw); new --mcu-restore (DANGEROUS, explicit, confirmed)
 #         rewrites MCU button-table page 3 (Home 0x24 + factory-default 0x21/0x25-0x2B) to recover a Home/Xbox
 #         key that went silent after a foreign tool overwrote the MCU table.
-OXP3_FIXES_VERSION="v1.5.1 (2026-09-25)"
+OXP3_FIXES_VERSION="v1.6.0 (2026-09-25)"
 TESTED_STEAMOS_BUILD="20260827.1000"
 TESTED_KERNEL_PREFIX="7.2.0-valve1"
 # ============================================================================
@@ -57,6 +60,7 @@ TESTED_KERNEL_PREFIX="7.2.0-valve1"
 #     6) battery percentage clamp service - the gauge over-reports right after a full charge (103 %); a root service
 #        overlays corrected capacity / energy_full sysfs values so Steam and the performance overlay stay at <= 100 %
 #     7) [EXPERIMENTAL, opt-in] gyroscope - ACPI override so the kernel sees the BMI260 + patched InputPlumber (Steam Deck gyro)
+#     8) TDP sync service - the MSR package PL1 (obeyed by the GPU) follows the MMIO PL1 that TDP tools set
 # Usage:
 #   ./oxp3-apply-fixes.sh                apply (asks sudo password, prints the plan and confirms)
 #   ./oxp3-apply-fixes.sh --check        check only, changes nothing, needs no sudo (covers every fix, gyro included when enabled)
@@ -106,6 +110,8 @@ VOLKEY_PY="$USER_HOME/oxp3-fix/oxp3-volkey-fix.py"          # in /home, survives
 VOLKEY_UNIT=/etc/systemd/system/oxp3-volkey-fix.service
 BATT_SH="$USER_HOME/oxp3-fix/oxp3-battery-clamp.sh"          # in /home, survives updates
 BATT_UNIT=/etc/systemd/system/oxp3-battery-clamp.service
+TDP_SH="$USER_HOME/oxp3-fix/oxp3-tdp-sync.sh"                # in /home, survives updates
+TDP_UNIT=/etc/systemd/system/oxp3-tdp-sync.service
 IP_YAML=/etc/inputplumber/devices.d/50-onexplayer_3.yaml
 IP_CAPMAP=/etc/inputplumber/capability_maps.d/onexplayer_type3.yaml   # id oxp3: Home key -> Guide   # InputPlumber 0.78 override dir is devices.d
 # experimental gyro (step 7)
@@ -121,7 +127,7 @@ GRUB_IMU_FILE=/etc/default/grub.d/oxp3-imu.cfg
 GYRO_BIOS="5.09"                                             # the ACPI override is a patched copy of this BIOS's SSDT26
 GYRO_IP_SERIES="0.78"                                        # the patched build is InputPlumber 0.78.0
 GYRO_BIN_SHA256="1107d95c34863c7865cac64183673135098d77265a32763c22fc7efbc1893aa3"
-GYRO_PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/v1.5.1/oxp3-fix.tar.gz"   # release archive holding the binary
+GYRO_PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/v1.6.0/oxp3-fix.tar.gz"   # release archive holding the binary
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"                  # the extracted release archive, if the script came from it
 ACPI_IMG_SHA256="0e9b716e65978ac7365fda6fddf476a18b352a2d1ed98f4f30c8d3f8558b2113"
 ACPI_IMG_OLD_SHA256="2d1a0a88e4cfe694cd4edc9b0d0a5e28f7f3f5bb9ccdcf7cbf1d5d01a02d42ad"   # earlier build of the same table (long cpio member name)
@@ -602,6 +608,74 @@ EOT
 VOLKEY_UNIT_CONTENT="${VOLKEY_UNIT_CONTENT//__VOLKEY_PY__/$VOLKEY_PY}"
 BATT_UNIT_CONTENT="${BATT_UNIT_CONTENT//__BATT_SH__/$BATT_SH}"
 
+# ---- TDP: MSR package PL1 follows the MMIO package PL1 (step 8) --------------------
+TDP_SH_CONTENT=$(cat <<'EOT'
+#!/bin/bash
+# oxp3-tdp-sync.sh - keep the ONEXPLAYER 3's MSR package power limit (PL1) equal to the MMIO one.
+#
+# Panther Lake has two package RAPL interfaces: MMIO (/sys/class/powercap/intel-rapl-mmio:0) and MSR
+# (/sys/class/powercap/intel-rapl:0). TDP tools such as SimpleDeckyTDP and the firmware itself (AC/DC switch) only
+# write the MMIO one, while the firmware leaves the MSR PL1 at 25 W. CPU loads follow the MMIO limit, but the GPU obeys
+# the MSR PL1: with MMIO at 50 W a ray-traced game ran the GPU at 1600-1850 of 2300 MHz with the throttle reason
+# "pl1" and ~33 W package power. Copying the MMIO PL1 into the MSR PL1 made the GPU run at 2300 MHz, unthrottled.
+#
+# This root service checks every 2 s and copies the MMIO PL1 into the MSR PL1 whenever they differ, so whatever sets
+# the TDP (a plugin, the firmware on AC/DC changes, a manual write) also sets the limit the GPU obeys. Only PL1 is
+# touched; the MSR PL2 stays at its firmware value. On stop the MSR PL1 found at the first start is written back
+# (a reboot restores the firmware value anyway). Options: --once prints both limits and exits, --stop restores.
+MSR=/sys/class/powercap/intel-rapl:0
+MMIO=/sys/class/powercap/intel-rapl-mmio:0
+DIR=/run/oxp3-tdp
+INTERVAL=${OXP3_TDP_INTERVAL:-2}
+[ -r "$MSR/constraint_0_power_limit_uw" ] && [ -r "$MMIO/constraint_0_power_limit_uw" ] || { echo "no MSR/MMIO package RAPL, nothing to do"; exit 0; }
+[ "$(cat "$MSR/name")" = package-0 ] && [ "$(cat "$MMIO/name")" = package-0 ] || { echo "RAPL zones are not package-0, nothing to do"; exit 0; }
+w() { echo "$(( $1 / 1000000 )) W"; }
+case "${1:-}" in
+    --once) echo "MMIO PL1 $(w "$(cat "$MMIO/constraint_0_power_limit_uw")") / PL2 $(w "$(cat "$MMIO/constraint_1_power_limit_uw")")"
+            echo "MSR  PL1 $(w "$(cat "$MSR/constraint_0_power_limit_uw")") / PL2 $(w "$(cat "$MSR/constraint_1_power_limit_uw")")"; exit 0 ;;
+    --stop) if [ -s "$DIR/msr_pl1_orig" ]; then
+                cat "$DIR/msr_pl1_orig" > "$MSR/constraint_0_power_limit_uw" && echo "MSR PL1 restored to $(w "$(cat "$DIR/msr_pl1_orig")")"
+            fi; exit 0 ;;
+esac
+mkdir -p "$DIR"
+[ -s "$DIR/msr_pl1_orig" ] || cat "$MSR/constraint_0_power_limit_uw" > "$DIR/msr_pl1_orig"
+last=""
+while :; do
+    want=$(cat "$MMIO/constraint_0_power_limit_uw" 2>/dev/null)
+    have=$(cat "$MSR/constraint_0_power_limit_uw" 2>/dev/null)
+    if [ "${want:-0}" -gt 0 ] && [ "$want" != "$have" ]; then
+        if echo "$want" > "$MSR/constraint_0_power_limit_uw" 2>/dev/null; then
+            [ "$want" != "$last" ] && echo "MSR PL1 $(w "$have") -> $(w "$want") (follows MMIO PL1)"
+            last=$want
+        elif [ "$want" != "$last" ]; then
+            echo "writing MSR PL1 = $(w "$want") failed"; last=$want
+        fi
+    fi
+    sleep "$INTERVAL"
+done
+EOT
+)
+
+TDP_UNIT_CONTENT=$(cat <<'EOT'
+[Unit]
+Description=OXP3: keep the MSR package power limit (PL1, obeyed by the GPU) equal to the MMIO one set by TDP tools
+# see the header of __TDP_SH__ ; revert: systemctl disable --now oxp3-tdp-sync.service
+After=basic.target
+ConditionPathExists=/sys/class/powercap/intel-rapl-mmio:0/constraint_0_power_limit_uw
+
+[Service]
+Type=simple
+ExecStart=/bin/bash __TDP_SH__
+ExecStopPost=/bin/bash __TDP_SH__ --stop
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOT
+)
+TDP_UNIT_CONTENT="${TDP_UNIT_CONTENT//__TDP_SH__/$TDP_SH}"
+
 # ---- experimental gyro (step 7) contents ------------------------------
 GRUB_IMU_CONTENT=$(cat <<'EOT'
 # ACPI table override for the gyroscope (experimental): renames the IMU node so the kernel's bmi270 driver binds.
@@ -746,7 +820,8 @@ hdr()  { printf '\n== %s ==\n' "$*"; }
 same_content() { # same_content <file> <content>  -> 0 if identical
     [ -f "$1" ] && [ "$(cat "$1")" = "$2" ]
 }
-CHANGED=0; NEED_REBOOT=0; NEED_RELOGIN=0; VOLKEY_RESTART=0; IP_RESTART=0; BATT_RESTART=0
+CHANGED=0; NEED_REBOOT=0; NEED_RELOGIN=0; VOLKEY_RESTART=0; IP_RESTART=0; BATT_RESTART=0; TDP_RESTART=0
+have_rapl() { [ -r /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw ] && [ -r /sys/class/powercap/intel-rapl-mmio:0/constraint_0_power_limit_uw ]; }
 
 # ---- guards -----------------------------------------------------------
 DMI_VENDOR="$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || true)"
@@ -853,6 +928,10 @@ if [ -r "$BAT_SYS/energy_now" ]; then
     say "  battery gauge : energy_now=$(cat "$BAT_SYS/energy_now") energy_full=$(cat "$BAT_SYS/energy_full" | tr -d ' ') capacity=$(cat "$BAT_SYS/capacity" | tr -d ' ')%   ($(findmnt -T "$BAT_SYS/capacity" -n -o SOURCE 2>/dev/null | grep -q oxp3-battery && echo "overlay active" || echo "raw kernel values"))"
     if systemctl is-active -q oxp3-battery-clamp.service 2>/dev/null; then say "  battery clamp service oxp3-battery-clamp : active"; else say "  battery clamp service oxp3-battery-clamp : inactive/missing"; fi
 fi
+if have_rapl; then
+    say "  package power limit PL1 : MMIO $(( $(cat /sys/class/powercap/intel-rapl-mmio:0/constraint_0_power_limit_uw) / 1000000 )) W, MSR $(( $(cat /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw) / 1000000 )) W   (the GPU obeys MSR; they should match)"
+    if systemctl is-active -q oxp3-tdp-sync.service 2>/dev/null; then say "  TDP sync service oxp3-tdp-sync : active"; else say "  TDP sync service oxp3-tdp-sync : inactive/missing"; fi
+fi
 if [ "$GYRO_ON" = 1 ]; then
     say "  gyro (experimental) : enabled ; IMU $([ "$IMU_ACTIVE" = 1 ] && echo "visible to the kernel (ACPI override active)" || echo "NOT visible yet (ACPI override not loaded: reboot needed)") ; patched InputPlumber $(gyro_bin_ok && echo present || echo missing)"
 elif [ "$GYRO_WANT" = 1 ]; then
@@ -907,6 +986,11 @@ if [ "$MODE" = "--check" ]; then
     same_content "$BATT_SH" "$BATT_SH_CONTENT" || { say "  [diff] battery clamp script missing or differs"; ok=0; }
     same_content "$BATT_UNIT" "$BATT_UNIT_CONTENT" || { say "  [diff] battery clamp unit missing or differs"; ok=0; }
     systemctl is-enabled -q oxp3-battery-clamp.service 2>/dev/null || { say "  [diff] oxp3-battery-clamp.service not enabled"; ok=0; }
+    if have_rapl; then
+        same_content "$TDP_SH" "$TDP_SH_CONTENT" || { say "  [diff] TDP sync script missing or differs"; ok=0; }
+        same_content "$TDP_UNIT" "$TDP_UNIT_CONTENT" || { say "  [diff] TDP sync unit missing or differs"; ok=0; }
+        systemctl is-enabled -q oxp3-tdp-sync.service 2>/dev/null || { say "  [diff] oxp3-tdp-sync.service not enabled"; ok=0; }
+    fi
     same_content "$IP_YAML" "$IP_YAML_CONTENT" || { say "  [diff] IP yaml missing or differs"; ok=0; }
     same_content "$IP_CAPMAP" "$IP_CAPMAP_CONTENT" || { say "  [diff] IP capability map missing or differs"; ok=0; }
     systemctl is-enabled -q inputplumber.service 2>/dev/null || { say "  [diff] inputplumber.service not enabled"; ok=0; }
@@ -988,6 +1072,8 @@ if [ "$MODE" = "--revert" ]; then
     if [ -f "$VOLKEY_PY" ]; then rm -f "$VOLKEY_PY"; say "  removed $VOLKEY_PY"; fi
     if [ -f "$BATT_UNIT" ]; then sudo systemctl disable --now oxp3-battery-clamp.service 2>/dev/null || true; sudo rm -f "$BATT_UNIT"; sudo systemctl daemon-reload; say "  oxp3-battery-clamp.service stopped and removed (raw kernel battery values again)"; fi
     if [ -f "$BATT_SH" ]; then rm -f "$BATT_SH"; say "  removed $BATT_SH"; fi
+    if [ -f "$TDP_UNIT" ]; then sudo systemctl disable --now oxp3-tdp-sync.service 2>/dev/null || true; sudo rm -f "$TDP_UNIT"; sudo systemctl daemon-reload; say "  oxp3-tdp-sync.service stopped and removed (MSR PL1 back to the firmware value)"; fi
+    if [ -f "$TDP_SH" ]; then rm -f "$TDP_SH"; say "  removed $TDP_SH"; fi
     if [ -f "$LUA_HDR" ]; then mv -f "$LUA_HDR" "$USER_HOME/oxp3-oled-hdr.lua.disabled"; say "  HDR lua moved to $USER_HOME/oxp3-oled-hdr.lua.disabled"; NEED_RELOGIN=1; fi
     if [ -f "$LUA_NOHDR_BAK" ] && [ ! -f "$LUA_NOHDR" ]; then mkdir -p "$LUA_DIR"; cp -f "$LUA_NOHDR_BAK" "$LUA_NOHDR"; say "  nohdr lua restored (prevents a black screen when HDR is on)"; NEED_RELOGIN=1; fi
     say "revert done. (The Wi-Fi firmware step is not undone: linux-firmware stays installed.)"
@@ -1035,6 +1121,7 @@ elif [ "$GYRO_WANT" = 1 ]; then
 else
     say "   7) gyro (experimental): not enabled (opt in with --gyro)"
 fi
+say "   8) $TDP_SH + $TDP_UNIT (MSR package PL1 follows the MMIO PL1)   $(have_rapl && echo "[RAPL OK]" || echo "[SKIPPED: no MSR/MMIO package RAPL]")"
 if [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then read -r -p "  Continue? (y/N) " _ans; case "$_ans" in y|Y) ;; *) say "  cancelled."; exit 0 ;; esac; fi
 sudo -v
 
@@ -1356,6 +1443,36 @@ if ! systemctl is-enabled -q oxp3-battery-clamp.service 2>/dev/null; then
 fi
 if [ "$BATT_RESTART" = 1 ] || ! systemctl is-active -q oxp3-battery-clamp.service 2>/dev/null; then
     sudo systemctl restart oxp3-battery-clamp.service && say "  [restart] oxp3-battery-clamp.service (capacity now $(sleep 1; cat /sys/class/power_supply/BAT0/capacity | tr -d ' ')%)"
+fi
+fi
+
+# e6. TDP sync (root service; the MSR package PL1, which the GPU obeys, follows the MMIO PL1 that TDP tools write)
+if ! have_rapl; then
+    say "  [skip] no MSR/MMIO package RAPL, skipping TDP sync"
+else
+mkdir -p "$(dirname "$TDP_SH")"
+if same_content "$TDP_SH" "$TDP_SH_CONTENT"; then
+    say "  [skip] $TDP_SH unchanged"
+else
+    printf '%s
+' "$TDP_SH_CONTENT" > "$TDP_SH"; chmod +x "$TDP_SH"
+    say "  [write] $TDP_SH"; CHANGED=1; TDP_RESTART=1
+fi
+if same_content "$TDP_UNIT" "$TDP_UNIT_CONTENT"; then
+    say "  [skip] $TDP_UNIT unchanged"
+else
+    printf '%s
+' "$TDP_UNIT_CONTENT" | sudo tee "$TDP_UNIT" >/dev/null
+    sudo systemctl daemon-reload
+    say "  [write] $TDP_UNIT"; CHANGED=1; TDP_RESTART=1
+fi
+if ! systemctl is-enabled -q oxp3-tdp-sync.service 2>/dev/null; then
+    sudo systemctl enable oxp3-tdp-sync.service >/dev/null 2>&1
+    say "  [enable] oxp3-tdp-sync.service"; CHANGED=1; TDP_RESTART=1
+fi
+if [ "$TDP_RESTART" = 1 ] || ! systemctl is-active -q oxp3-tdp-sync.service 2>/dev/null; then
+    sudo systemctl restart oxp3-tdp-sync.service && sleep 1 && say "  [restart] oxp3-tdp-sync.service ($(bash "$TDP_SH" --once | tr '
+' ';' | sed 's/;$//'))"
 fi
 fi
 
