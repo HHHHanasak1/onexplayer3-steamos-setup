@@ -644,8 +644,8 @@ bias_gyro_ptp=0.6 # deg/s: max gyro span for a window to count as still
 bias_accel_ptp=0.02 # g: max accelerometer span for a window to count as still
 # response shaping (gyro mode): Steam's integrated angle = gain * curve(physical angle)
 range=45          # deg: knee of the curve; below it small tilts are boosted, above it the response flattens
-curve=0.5         # 0 = linear; 0.5 = 1.5x near centre tapering to 0.5x at `range` (max 0.95)
-gain=0.85         # overall multiplier (lower = calmer at large angles)
+curve=0           # 0 = linear (default); 0.5 = 1.5x near centre tapering to 0.5x at `range` (max 0.95)
+gain=1.0          # overall multiplier (lower = calmer at large angles)
 # stick mode only
 max_angle=25
 deadzone=1.5
