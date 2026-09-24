@@ -1,0 +1,719 @@
+diff --git a/src/config/mod.rs b/src/config/mod.rs
+index f62a9eb..16f0a63 100644
+--- a/src/config/mod.rs
++++ b/src/config/mod.rs
+@@ -403,6 +403,17 @@ pub struct IIO {
+     )]
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub mount_matrix: Option<MountMatrix>,
++    /// Static gyro bias in degrees per second (sensor frame, before the mount
++    /// matrix) that is subtracted from every sample.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub gyro_bias: Option<[f64; 3]>,
++    /// Re-estimate the gyro bias whenever the device is detected to be at rest.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub gyro_auto_calibrate: Option<bool>,
++    /// Static accelerometer bias in m/s^2 (sensor frame, before the mount matrix)
++    /// that is subtracted from every sample.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub accel_bias: Option<[f64; 3]>,
+ }
+ 
+ #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+diff --git a/src/drivers/iio_imu/driver.rs b/src/drivers/iio_imu/driver.rs
+index 9e23672..4bb3fff 100644
+--- a/src/drivers/iio_imu/driver.rs
++++ b/src/drivers/iio_imu/driver.rs
+@@ -1,6 +1,7 @@
+ use std::{
+-    collections::{HashMap, HashSet},
++    collections::{HashMap, HashSet, VecDeque},
+     error::Error,
++    f64::consts::PI,
+     fs::File,
+     io::{self, BufRead, BufReader},
+ };
+@@ -19,6 +20,117 @@ use super::{
+ 
+ const DEFAULT_SAMPLE_RATE: f64 = 200.0;
+ 
++/// Number of consecutive samples inspected for at-rest detection (~2 s at 200 Hz)
++const CALIB_WINDOW: usize = 400;
++/// Largest gyro peak-to-peak movement (rad/s) a window may contain to count as "at rest"
++const CALIB_MAX_PTP: f64 = 0.8 * PI / 180.0;
++/// Largest accelerometer peak-to-peak movement (m/s^2) a window may contain to count as "at rest"
++const CALIB_MAX_ACCEL_PTP: f64 = 0.3;
++/// Weight of a strict at-rest estimate in the running bias
++const CALIB_BLEND: f64 = 0.5;
++/// Loose tier (device held still-ish): gyro / accel peak-to-peak limits, per-update step limit and weight
++const CALIB_LOOSE_PTP: f64 = 1.5 * PI / 180.0;
++const CALIB_LOOSE_ACCEL_PTP: f64 = 1.5;
++const CALIB_LOOSE_MAX_STEP: f64 = 0.3 * PI / 180.0;
++const CALIB_LOOSE_BLEND: f64 = 0.1;
++
++/// Gyro bias compensation settings: a static bias in deg/s in the sensor frame
++/// (before the mount matrix) and optional at-rest auto calibration.
++#[derive(Debug, Clone, Default)]
++pub struct GyroCalibration {
++    pub bias_deg: [f64; 3],
++    pub auto_calibrate: bool,
++    /// Accelerometer bias in m/s^2 (sensor frame), subtracted from every sample
++    pub accel_bias: [f64; 3],
++}
++
++/// Runtime state of the gyro bias compensation
++struct GyroCalibState {
++    /// Current bias estimate in rad/s (sensor frame)
++    bias: [f64; 3],
++    auto: bool,
++    window: VecDeque<[f64; 3]>,
++    accel_window: VecDeque<[f64; 3]>,
++}
++
++impl GyroCalibState {
++    fn new(config: GyroCalibration) -> Self {
++        let mut bias = [0.0; 3];
++        for k in 0..3 {
++            bias[k] = config.bias_deg[k] * PI / 180.0;
++        }
++        log::info!(
++            "Gyro bias compensation: static {:?} deg/s, auto calibrate: {}",
++            config.bias_deg,
++            config.auto_calibrate
++        );
++        Self {
++            bias,
++            auto: config.auto_calibrate,
++            window: VecDeque::with_capacity(CALIB_WINDOW),
++            accel_window: VecDeque::with_capacity(CALIB_WINDOW),
++        }
++    }
++
++    /// Update the at-rest estimate with the given raw sample and subtract the bias
++    fn apply(&mut self, value: &mut [f64; 3], accel: [f64; 3]) {
++        if self.auto {
++            self.window.push_back(*value);
++            self.accel_window.push_back(accel);
++            if self.window.len() >= CALIB_WINDOW {
++                let mut gyro_ptp: f64 = 0.0;
++                let mut accel_ptp: f64 = 0.0;
++                let mut mean = [0.0; 3];
++                for k in 0..3 {
++                    let mut lo = f64::MAX;
++                    let mut hi = f64::MIN;
++                    let mut sum = 0.0;
++                    for sample in self.window.iter() {
++                        lo = lo.min(sample[k]);
++                        hi = hi.max(sample[k]);
++                        sum += sample[k];
++                    }
++                    gyro_ptp = gyro_ptp.max(hi - lo);
++                    mean[k] = sum / self.window.len() as f64;
++                    let mut alo = f64::MAX;
++                    let mut ahi = f64::MIN;
++                    for sample in self.accel_window.iter() {
++                        alo = alo.min(sample[k]);
++                        ahi = ahi.max(sample[k]);
++                    }
++                    accel_ptp = accel_ptp.max(ahi - alo);
++                }
++                let (blend, max_step) = if gyro_ptp < CALIB_MAX_PTP && accel_ptp < CALIB_MAX_ACCEL_PTP {
++                    (CALIB_BLEND, f64::MAX)
++                } else if gyro_ptp < CALIB_LOOSE_PTP && accel_ptp < CALIB_LOOSE_ACCEL_PTP {
++                    (CALIB_LOOSE_BLEND, CALIB_LOOSE_MAX_STEP)
++                } else {
++                    (0.0, 0.0)
++                };
++                if blend > 0.0 {
++                    for k in 0..3 {
++                        let step = (blend * (mean[k] - self.bias[k])).clamp(-max_step, max_step);
++                        self.bias[k] += step;
++                    }
++                    log::debug!(
++                        "Gyro still (ptp {:.2} deg/s, blend {}), bias now [{:.3}, {:.3}, {:.3}] deg/s",
++                        gyro_ptp * 180.0 / PI,
++                        blend,
++                        self.bias[0] * 180.0 / PI,
++                        self.bias[1] * 180.0 / PI,
++                        self.bias[2] * 180.0 / PI
++                    );
++                }
++                self.window.clear();
++                self.accel_window.clear();
++            }
++        }
++        for k in 0..3 {
++            value[k] -= self.bias[k];
++        }
++    }
++}
++
+ /// Driver for reading IIO IMU data
+ pub struct Driver {
+     _device: Device, // must outlive Channel raw pointers
+@@ -27,6 +139,9 @@ pub struct Driver {
+     accel_info: HashMap<String, AxisInfo>,
+     gyro: HashMap<String, Channel>,
+     gyro_info: HashMap<String, AxisInfo>,
++    gyro_calib: GyroCalibState,
++    accel_bias: [f64; 3],
++    last_accel: [f64; 3],
+     /// List of events that should not be generated
+     filtered_events: HashSet<Capability>,
+ }
+@@ -37,6 +152,7 @@ impl Driver {
+         name: String,
+         matrix: Option<MountMatrix>,
+         sample_rate: Option<f64>,
++        calibration: GyroCalibration,
+     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+         log::debug!("Creating IIO IMU driver instance for {name}");
+ 
+@@ -111,6 +227,9 @@ impl Driver {
+             accel_info,
+             gyro,
+             gyro_info,
++            accel_bias: calibration.accel_bias,
++            last_accel: [0.0; 3],
++            gyro_calib: GyroCalibState::new(calibration),
+             filtered_events: Default::default(),
+         })
+     }
+@@ -146,7 +265,7 @@ impl Driver {
+     }
+ 
+     /// Poll the device for data
+-    pub fn poll(&self) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
++    pub fn poll(&mut self) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
+         let mut events = vec![];
+ 
+         // Read from the accelerometer
+@@ -173,7 +292,7 @@ impl Driver {
+     }
+ 
+     /// Polls all the channels from the accelerometer
+-    fn poll_accel(&self) -> Result<Option<Event>, Box<dyn Error + Send + Sync>> {
++    fn poll_accel(&mut self) -> Result<Option<Event>, Box<dyn Error + Send + Sync>> {
+         if self.accel.is_empty() {
+             return Ok(None);
+         }
+@@ -199,13 +318,18 @@ impl Driver {
+                 accel_input.yaw = value;
+             }
+         }
++        // Static bias compensation in the sensor frame, before the mount matrix
++        accel_input.roll -= self.accel_bias[0];
++        accel_input.pitch -= self.accel_bias[1];
++        accel_input.yaw -= self.accel_bias[2];
++        self.last_accel = [accel_input.roll, accel_input.pitch, accel_input.yaw];
+         self.rotate_value(&mut accel_input);
+ 
+         Ok(Some(Event::Accelerometer(accel_input)))
+     }
+ 
+     /// Polls all the channels from the gyro
+-    fn poll_gyro(&self) -> Result<Option<Event>, Box<dyn Error + Send + Sync>> {
++    fn poll_gyro(&mut self) -> Result<Option<Event>, Box<dyn Error + Send + Sync>> {
+         if self.gyro.is_empty() {
+             return Ok(None);
+         }
+@@ -231,6 +355,13 @@ impl Driver {
+                 gyro_input.yaw = value;
+             }
+         }
++        // Bias compensation in the sensor frame, before the mount matrix
++        let mut raw = [gyro_input.roll, gyro_input.pitch, gyro_input.yaw];
++        let accel = self.last_accel;
++        self.gyro_calib.apply(&mut raw, accel);
++        gyro_input.roll = raw[0];
++        gyro_input.pitch = raw[1];
++        gyro_input.yaw = raw[2];
+         self.rotate_value(&mut gyro_input);
+ 
+         Ok(Some(Event::Gyro(gyro_input)))
+diff --git a/src/input/source/iio/accel_gyro_3d.rs b/src/input/source/iio/accel_gyro_3d.rs
+index 737daca..6b22071 100644
+--- a/src/input/source/iio/accel_gyro_3d.rs
++++ b/src/input/source/iio/accel_gyro_3d.rs
+@@ -2,7 +2,7 @@ use std::{collections::HashSet, error::Error, fmt::Debug};
+ 
+ use crate::{
+     config,
+-    drivers::iio_imu::{self, driver::Driver, info::MountMatrix},
++    drivers::iio_imu::{self, driver::{Driver, GyroCalibration}, info::MountMatrix},
+     input::{
+         capability::{Capability, Source},
+         event::{native::NativeEvent, value::InputValue},
+@@ -50,7 +50,15 @@ impl AccelGyro3dImu {
+ 
+         let id = device_info.sysname();
+         let name = device_info.name();
+-        let driver = Driver::new(id, name, mount_matrix, sample_rate)?;
++        let calibration = config
++            .as_ref()
++            .map(|c| GyroCalibration {
++                bias_deg: c.gyro_bias.unwrap_or([0.0; 3]),
++                auto_calibrate: c.gyro_auto_calibrate.unwrap_or(false),
++                accel_bias: c.accel_bias.unwrap_or([0.0; 3]),
++            })
++            .unwrap_or_default();
++        let driver = Driver::new(id, name, mount_matrix, sample_rate, calibration)?;
+ 
+         Ok(Self { driver })
+     }
+diff --git a/src/input/source/iio/bmi_imu.rs b/src/input/source/iio/bmi_imu.rs
+index 329c675..05d64b2 100644
+--- a/src/input/source/iio/bmi_imu.rs
++++ b/src/input/source/iio/bmi_imu.rs
+@@ -2,7 +2,7 @@ use std::{collections::HashSet, error::Error, f64::consts::PI, fmt::Debug};
+ 
+ use crate::{
+     config,
+-    drivers::iio_imu::{self, driver::Driver, info::MountMatrix},
++    drivers::iio_imu::{self, driver::{Driver, GyroCalibration}, info::MountMatrix},
+     input::{
+         capability::{Capability, Gamepad},
+         event::{native::NativeEvent, value::InputValue},
+@@ -43,7 +43,15 @@ impl BmiImu {
+ 
+         let id = device_info.sysname();
+         let name = device_info.name();
+-        let driver = Driver::new(id, name, mount_matrix, sample_rate)?;
++        let calibration = config
++            .as_ref()
++            .map(|c| GyroCalibration {
++                bias_deg: c.gyro_bias.unwrap_or([0.0; 3]),
++                auto_calibrate: c.gyro_auto_calibrate.unwrap_or(false),
++                accel_bias: c.accel_bias.unwrap_or([0.0; 3]),
++            })
++            .unwrap_or_default();
++        let driver = Driver::new(id, name, mount_matrix, sample_rate, calibration)?;
+ 
+         Ok(Self { driver })
+     }
+@@ -91,6 +99,11 @@ impl Debug for BmiImu {
+ // a single thread.
+ unsafe impl Send for BmiImu {}
+ 
++/// Steam Deck accelerometer units: int16 over +-2 g (SDL: value / 32768 * 2 g), i.e. 16384 LSB per g
++const ACCEL_LSB_PER_MS2: f64 = 1.0 / 0.0006125; // same LSB as src/drivers/steam_deck/driver.rs
++/// Steam Deck gyro units: int16 over +-2000 deg/s (SDL: value / 32768 * 2000), i.e. 16.384 LSB per deg/s
++const GYRO_LSB_PER_DPS: f64 = 1.0 / 0.0625; // 16 LSB per deg/s, as the real Steam Deck
++
+ /// Translate the given driver events into native events
+ fn translate_events(events: Vec<iio_imu::event::Event>) -> Vec<NativeEvent> {
+     events.into_iter().map(translate_event).collect()
+@@ -102,9 +115,10 @@ fn translate_event(event: iio_imu::event::Event) -> NativeEvent {
+         iio_imu::event::Event::Accelerometer(data) => {
+             let cap = Capability::Gamepad(Gamepad::Accelerometer);
+             let value = InputValue::Vector3 {
+-                x: Some(data.roll),
+-                y: Some(data.pitch),
+-                z: Some(data.yaw),
++                // Steam Deck report ordering (SDL_hidapi_steamdeck.c): accel = (right, top edge, out of screen)
++                x: Some(data.roll * ACCEL_LSB_PER_MS2),
++                y: Some(data.pitch * ACCEL_LSB_PER_MS2),
++                z: Some(data.yaw * ACCEL_LSB_PER_MS2),
+             };
+             NativeEvent::new(cap, value)
+         }
+@@ -116,9 +130,10 @@ fn translate_event(event: iio_imu::event::Event) -> NativeEvent {
+             // apply before noise is amplified to the point the gyro cannot calibrate.
+             let cap = Capability::Gamepad(Gamepad::Gyro);
+             let value = InputValue::Vector3 {
+-                x: Some(data.roll * (180.0 / PI) * 12.0),
+-                y: Some(data.pitch * (180.0 / PI) * 12.0),
+-                z: Some(data.yaw * (180.0 / PI) * 12.0),
++                // Steam Deck report ordering (SDL_hidapi_steamdeck.c): gyro = (about right, about out-of-screen, about top edge)
++                x: Some(data.roll * (180.0 / PI) * GYRO_LSB_PER_DPS),
++                y: Some(data.yaw * (180.0 / PI) * GYRO_LSB_PER_DPS),
++                z: Some(data.pitch * (180.0 / PI) * GYRO_LSB_PER_DPS),
+             };
+             NativeEvent::new(cap, value)
+         }
+diff --git a/src/input/target/gyro_steer.rs b/src/input/target/gyro_steer.rs
+new file mode 100644
+index 0000000..d5d9143
+--- /dev/null
++++ b/src/input/target/gyro_steer.rs
+@@ -0,0 +1,268 @@
++//! OXP3 gyro drift handling for the virtual Steam Deck (deck-uhid target).
++//!
++//! Steam's "gyro to joystick (deflection)" integrates the yaw rate we send into an angle. About the screen
++//! normal gravity cannot observe the angle, so any gyro bias becomes a runaway centre drift. This module shapes
++//! the rate stream before it reaches Steam:
++//!   * `gyro` mode (default): the yaw rate is passed through a slow high-pass - a mirror of Steam's integral is
++//!     kept and a small return rate (-angle / tau) is folded into the output, so Steam's own integrated angle
++//!     relaxes toward centre with time constant `tau`. A constant bias then ends up as a bounded offset
++//!     (bias * tau) instead of a drift, and the stream has ~zero mean so Steam's bias estimator has nothing to
++//!     fight. Optional at-rest bias learning on top.
++//!   * `stick` mode: the same angle is mapped to a left-stick X deflection instead (no gyro in Steam needed).
++//! Parameters: `/etc/inputplumber/oxp3-gyro-steer.conf` (key=value, re-read every 2 s).
++use std::{fs, time::{Duration, Instant, SystemTime}};
++
++const CONF_PATH: &str = "/etc/inputplumber/oxp3-gyro-steer.conf";
++const GYRO_LSB_PER_DPS: f64 = 16.0;
++const ACCEL_LSB_PER_G: f64 = 16384.0;
++
++#[derive(Clone, Copy, Debug, PartialEq)]
++enum Mode {
++    Gyro,
++    Stick,
++}
++
++#[derive(Clone, Copy, Debug)]
++struct Params {
++    enabled: bool,
++    mode: Mode,
++    tau: f64,         // seconds: the integrated angle relaxes toward centre with this time constant
++    bias_auto: bool,  // learn the gyro bias while the device rests
++    bias_gyro_ptp: f64,  // deg/s: max gyro span inside a still window
++    bias_accel_ptp: f64, // g: max accelerometer span inside a still window
++    // gyro mode response shaping: Steam's integrated angle becomes gain * curve(theta)
++    range: f64, // degrees: knee of the curve (curve(range) == range)
++    curve: f64, // 0 = linear; k gives slope 1+k near centre tapering to 1-k at `range`
++    gain: f64,  // overall multiplier
++    // stick mode only
++    max_angle: f64,
++    deadzone: f64,
++    accel_gain: f64,
++    smooth_hz: f64,
++    invert: bool,
++    upright_min: f64,
++}
++
++impl Default for Params {
++    fn default() -> Self {
++        Self {
++            enabled: false,
++            mode: Mode::Gyro,
++            tau: 20.0,
++            bias_auto: true,
++            bias_gyro_ptp: 0.6,
++            bias_accel_ptp: 0.02,
++            range: 45.0,
++            curve: 0.0,
++            gain: 1.0,
++            max_angle: 25.0,
++            deadzone: 1.5,
++            accel_gain: 2.0,
++            smooth_hz: 8.0,
++            invert: false,
++            upright_min: 0.6,
++        }
++    }
++}
++
++pub struct GyroSteer {
++    p: Params,
++    conf_checked: Instant,
++    conf_mtime: Option<SystemTime>,
++    angle: f64,      // leaked physical yaw angle, degrees
++    sent_angle: f64, // mirror of Steam's integral of what we sent (== gain * curve(angle) once settled)
++    bias: f64,       // learned bias, deg/s
++    out: f64,   // stick mode: smoothed normalised deflection
++    last_gyro: Option<Instant>,
++    phys_x: i16,
++    accel: [f64; 3],
++    win: Vec<f64>,
++    win_accel: Vec<f64>,
++    win_start: Instant,
++    log_at: Instant,
++}
++
++impl GyroSteer {
++    pub fn new() -> Self {
++        let mut s = Self {
++            p: Params::default(),
++            conf_checked: Instant::now() - Duration::from_secs(10),
++            conf_mtime: None,
++            angle: 0.0,
++            sent_angle: 0.0,
++            bias: 0.0,
++            out: 0.0,
++            last_gyro: None,
++            phys_x: 0,
++            accel: [0.0, 0.0, 1.0],
++            win: Vec::with_capacity(1024),
++            win_accel: Vec::with_capacity(1024),
++            win_start: Instant::now(),
++            log_at: Instant::now(),
++        };
++        s.maybe_reload(Instant::now());
++        s
++    }
++
++    fn maybe_reload(&mut self, now: Instant) {
++        if now.duration_since(self.conf_checked) < Duration::from_secs(2) {
++            return;
++        }
++        self.conf_checked = now;
++        let mtime = fs::metadata(CONF_PATH).and_then(|m| m.modified()).ok();
++        if mtime == self.conf_mtime && mtime.is_some() {
++            return;
++        }
++        self.conf_mtime = mtime;
++        let mut p = Params::default();
++        if let Ok(text) = fs::read_to_string(CONF_PATH) {
++            for line in text.lines() {
++                let line = line.split('#').next().unwrap_or("").trim();
++                let Some((k, v)) = line.split_once('=') else { continue };
++                let (k, v) = (k.trim(), v.trim());
++                let b = |v: &str| matches!(v, "1" | "true" | "yes" | "on");
++                match k {
++                    "enabled" => p.enabled = b(v),
++                    "mode" => p.mode = if v.eq_ignore_ascii_case("stick") { Mode::Stick } else { Mode::Gyro },
++                    "tau" => p.tau = v.parse().unwrap_or(p.tau),
++                    "bias_auto" => p.bias_auto = b(v),
++                    "bias_gyro_ptp" => p.bias_gyro_ptp = v.parse().unwrap_or(p.bias_gyro_ptp),
++                    "bias_accel_ptp" => p.bias_accel_ptp = v.parse().unwrap_or(p.bias_accel_ptp),
++                    "range" => p.range = v.parse().unwrap_or(p.range),
++                    "curve" => p.curve = v.parse().unwrap_or(p.curve),
++                    "gain" => p.gain = v.parse().unwrap_or(p.gain),
++                    "max_angle" => p.max_angle = v.parse().unwrap_or(p.max_angle),
++                    "deadzone" => p.deadzone = v.parse().unwrap_or(p.deadzone),
++                    "accel_gain" => p.accel_gain = v.parse().unwrap_or(p.accel_gain),
++                    "smooth_hz" => p.smooth_hz = v.parse().unwrap_or(p.smooth_hz),
++                    "invert" => p.invert = b(v),
++                    "upright_min" => p.upright_min = v.parse().unwrap_or(p.upright_min),
++                    _ => {}
++                }
++            }
++        }
++        p.tau = p.tau.max(0.5);
++        p.range = p.range.max(5.0);
++        p.curve = p.curve.clamp(0.0, 0.95);
++        p.gain = p.gain.clamp(0.1, 5.0);
++        p.max_angle = p.max_angle.max(1.0);
++        p.deadzone = p.deadzone.clamp(0.0, p.max_angle - 0.5);
++        let changed = self.p.enabled != p.enabled || self.p.mode != p.mode;
++        self.p = p;
++        if !p.enabled || changed {
++            self.angle = 0.0;
++            self.sent_angle = 0.0;
++            self.out = 0.0;
++        }
++        if changed {
++            log::info!("OXP3 gyro drift handling {} ({:?})", if p.enabled { "enabled" } else { "disabled" }, self.p);
++        }
++    }
++
++    /// Accelerometer sample in Steam Deck report units (x right, y top edge, z out of screen)
++    pub fn on_accel(&mut self, x: f64, y: f64, z: f64) {
++        self.accel = [x / ACCEL_LSB_PER_G, y / ACCEL_LSB_PER_G, z / ACCEL_LSB_PER_G];
++    }
++
++    /// Physical left stick X (i16); returns the value to report
++    pub fn set_phys_x(&mut self, v: i16) -> i16 {
++        self.phys_x = v;
++        self.merged()
++    }
++
++    /// Gyro sample about the screen normal in Steam Deck report units (16 LSB per deg/s).
++    /// Returns (rate to report in the same units, Some(left stick X) in stick mode).
++    pub fn on_gyro(&mut self, rate_lsb: f64) -> (f64, Option<i16>) {
++        let now = Instant::now();
++        self.maybe_reload(now);
++        if !self.p.enabled {
++            self.last_gyro = None;
++            return (rate_lsb, None);
++        }
++        let raw = rate_lsb / GYRO_LSB_PER_DPS;
++        let dt = match self.last_gyro {
++            Some(t) => now.duration_since(t).as_secs_f64().min(0.05),
++            None => 0.0,
++        };
++        self.last_gyro = Some(now);
++
++        // at-rest bias learning: 2 s windows with a tiny gyro span and a still accelerometer
++        if self.p.bias_auto {
++            self.win.push(raw);
++            self.win_accel.push(self.accel[0] + self.accel[1] * 3.0 + self.accel[2] * 7.0);
++            if now.duration_since(self.win_start) >= Duration::from_secs(2) {
++                let (mut lo, mut hi, mut sum) = (f64::MAX, f64::MIN, 0.0);
++                for &g in &self.win { lo = lo.min(g); hi = hi.max(g); sum += g; }
++                let (mut alo, mut ahi) = (f64::MAX, f64::MIN);
++                for &a in &self.win_accel { alo = alo.min(a); ahi = ahi.max(a); }
++                if self.win.len() > 100 && hi - lo < self.p.bias_gyro_ptp && ahi - alo < self.p.bias_accel_ptp {
++                    let mean = sum / self.win.len() as f64;
++                    self.bias = 0.8 * self.bias + 0.2 * mean;
++                }
++                self.win.clear();
++                self.win_accel.clear();
++                self.win_start = now;
++            }
++        }
++
++        let rate = raw - self.bias;
++        match self.p.mode {
++            Mode::Gyro => {
++                // slow high-pass on the physical angle: theta' = rate - theta/tau
++                let ret = self.angle / self.p.tau;
++                self.angle += (rate - ret) * dt;
++                self.angle = self.angle.clamp(-720.0, 720.0);
++                // Steam integrates what we send, so send the increment of the shaped angle: Steam's angle then
++                // tracks gain * curve(theta) exactly (any leftover after the rate clamp is sent next sample)
++                let target = self.shaped(self.angle);
++                let sent = if dt > 0.0 { ((target - self.sent_angle) / dt).clamp(-2000.0, 2000.0) } else { 0.0 };
++                self.sent_angle += sent * dt;
++                if now.duration_since(self.log_at) >= Duration::from_secs(10) {
++                    self.log_at = now;
++                    log::debug!("gyro drift: angle {:.2} deg sent {:.2} deg bias {:.3} dps return {:.3} dps", self.angle, self.sent_angle, self.bias, ret);
++                }
++                (sent * GYRO_LSB_PER_DPS, None)
++            }
++            Mode::Stick => {
++                self.angle = (self.angle + rate * dt) * (-dt / self.p.tau).exp();
++                let [ax, ay, az] = self.accel;
++                let total = (ax * ax + ay * ay + az * az).sqrt().max(1e-3);
++                let inplane = (ax * ax + ay * ay).sqrt() / total;
++                if inplane > self.p.upright_min && dt > 0.0 {
++                    let acc_angle = ax.atan2(-ay).to_degrees();
++                    let w = ((inplane - self.p.upright_min) / (1.0 - self.p.upright_min)).clamp(0.0, 1.0);
++                    let k = (self.p.accel_gain * w * dt).min(1.0);
++                    self.angle += k * (acc_angle - self.angle);
++                }
++                self.angle = self.angle.clamp(-90.0, 90.0);
++                let a = if self.p.invert { -self.angle } else { self.angle };
++                let mag = a.abs();
++                let norm = if mag <= self.p.deadzone { 0.0 } else { ((mag - self.p.deadzone) / (self.p.max_angle - self.p.deadzone)).min(1.0) * a.signum() };
++                let alpha = if dt > 0.0 { 1.0 - (-dt * 2.0 * std::f64::consts::PI * self.p.smooth_hz).exp() } else { 1.0 };
++                self.out += alpha * (norm - self.out);
++                if now.duration_since(self.log_at) >= Duration::from_secs(10) {
++                    self.log_at = now;
++                    log::debug!("gyro steer: angle {:.2} deg bias {:.3} dps inplane {:.2} out {:.3}", self.angle, self.bias, inplane, self.out);
++                }
++                (rate_lsb, Some(self.merged()))
++            }
++        }
++    }
++
++    /// Response curve for gyro mode. With x = |theta| / range: (1+k)x - kx^2 up to the knee (slope 1+k at the
++    /// centre, 1-k at the knee), linear with slope 1-k beyond it. Odd-symmetric, scaled by `gain`.
++    fn shaped(&self, theta: f64) -> f64 {
++        let k = self.p.curve;
++        let x = theta.abs() / self.p.range;
++        let g = if x <= 1.0 { (1.0 + k) * x - k * x * x } else { 1.0 + (1.0 - k) * (x - 1.0) };
++        self.p.gain * self.p.range * g * theta.signum()
++    }
++
++    fn merged(&self) -> i16 {
++        if !self.p.enabled || self.p.mode != Mode::Stick {
++            return self.phys_x;
++        }
++        let phys = self.phys_x as f64 / 32767.0;
++        ((phys + self.out).clamp(-1.0, 1.0) * 32767.0).round() as i16
++    }
++}
+diff --git a/src/input/target/mod.rs b/src/input/target/mod.rs
+index 873b0a8..1e57476 100644
+--- a/src/input/target/mod.rs
++++ b/src/input/target/mod.rs
+@@ -3,6 +3,7 @@ pub mod command;
+ pub mod dbus;
+ pub mod debug;
+ pub mod dualsense;
++pub mod gyro_steer;
+ pub mod horipad_steam;
+ pub mod keyboard;
+ pub mod mouse;
+diff --git a/src/input/target/steam_deck_uhid.rs b/src/input/target/steam_deck_uhid.rs
+index 0f08442..80b576c 100644
+--- a/src/input/target/steam_deck_uhid.rs
++++ b/src/input/target/steam_deck_uhid.rs
+@@ -48,6 +48,9 @@ use super::{
+ // The minimum amount of time that button up events must wait after
+ // a button down event.
+ const MIN_FRAME_TIME: Duration = Duration::from_millis(8);
++/// Input report pacing: must match ATTRIB_CONNECTION_INTERVAL_IN_US (4000) that Steam is told, because Steam
++/// integrates the gyro per report with that fixed time step.
++const REPORT_INTERVAL: Duration = Duration::from_micros(4000);
+ 
+ pub struct SteamDeckUhidDevice {
+     chip_id: [u8; 15],
+@@ -62,6 +65,10 @@ pub struct SteamDeckUhidDevice {
+     queued_events: Vec<ScheduledNativeEvent>,
+     serial_number: String,
+     state: PackedInputDataReport,
++    /// Deadline for the next input report
++    next_report: Instant,
++    /// OXP3 gyro steering (rotation about the screen normal -> left stick X)
++    steer: super::gyro_steer::GyroSteer,
+ }
+ 
+ impl SteamDeckUhidDevice {
+@@ -82,6 +89,8 @@ impl SteamDeckUhidDevice {
+             queued_events: vec![],
+             serial_number: "1NPU7PLUMB3R".to_string(),
+             state: PackedInputDataReport::default(),
++            next_report: Instant::now(),
++            steer: super::gyro_steer::GyroSteer::new(),
+         })
+     }
+ 
+@@ -104,6 +113,21 @@ impl SteamDeckUhidDevice {
+ 
+     /// Write the current device state to the device
+     fn write_state(&mut self) -> Result<(), Box<dyn Error>> {
++        // Pace reports at the advertised connection interval
++        let now = Instant::now();
++        if now < self.next_report {
++            return Ok(());
++        }
++        self.next_report += REPORT_INTERVAL;
++        if now > self.next_report + REPORT_INTERVAL {
++            // fell far behind (device idle / suspended): resynchronise instead of bursting
++            self.next_report = now + REPORT_INTERVAL;
++        }
++
++        // Increment the frame counter only for reports that are sent
++        let frame = self.state.frame.to_primitive();
++        self.state.frame = Integer::from_primitive(frame.wrapping_add(1));
++
+         let data = self.state.pack()?;
+ 
+         // Write the state to the virtual HID
+@@ -186,6 +210,7 @@ impl SteamDeckUhidDevice {
+                             if let Some(x) = x {
+                                 let value =
+                                     denormalize_signed_value_i16(x, STICK_X_MIN, STICK_X_MAX);
++                                let value = self.steer.set_phys_x(value);
+                                 self.state.l_stick_x = Integer::from_primitive(value);
+                             }
+                             if let Some(y) = y {
+@@ -291,6 +316,9 @@ impl SteamDeckUhidDevice {
+                 },
+                 Gamepad::Accelerometer => {
+                     if let InputValue::Vector3 { x, y, z } = value {
++                        if let (Some(ax), Some(ay), Some(az)) = (x, y, z) {
++                            self.steer.on_accel(ax, ay, az);
++                        }
+                         if let Some(x) = x {
+                             self.state.accel_x = Integer::from_primitive(x as i16);
+                         }
+@@ -313,6 +341,14 @@ impl SteamDeckUhidDevice {
+                         if let Some(z) = z {
+                             self.state.roll = Integer::from_primitive(z as i16);
+                         }
++                        if let Some(y) = y {
++                            // OXP3: shape the rate about the screen normal (drift handling), optional stick mode
++                            let (rate, stick) = self.steer.on_gyro(y);
++                            self.state.yaw = Integer::from_primitive(rate as i16);
++                            if let Some(v) = stick {
++                                self.state.l_stick_x = Integer::from_primitive(v);
++                            }
++                        }
+                     }
+                 }
+                 _ => (),
+@@ -886,10 +922,6 @@ impl TargetOutputDevice for SteamDeckUhidDevice {
+             return Ok(vec![]);
+         };
+ 
+-        // Increment the frame
+-        let frame = self.state.frame.to_primitive();
+-        self.state.frame = Integer::from_primitive(frame.wrapping_add(1));
+-
+         let event = match device.read() {
+             Ok(event) => event,
+             Err(err) => match err {
