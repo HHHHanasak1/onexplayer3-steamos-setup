@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=OXP3 Fix Pack (Sleep/HDR/Volume/Gamepad)
-Comment=Re-apply the ONEXPLAYER 3 SteamOS fixes (run after a SteamOS update)
+Name=OXP3 Fix Pack (Wi-Fi/Sleep/HDR/Keys/Battery/Gyro)
+Comment=Apply or re-apply the ONEXPLAYER 3 SteamOS fixes (run after every SteamOS update)
 Icon=preferences-system
 Terminal=false
 Exec=konsole --hold -e bash -c "$HOME/oxp3-fix/oxp3-apply-fixes.sh"
