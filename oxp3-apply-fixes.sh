@@ -1,12 +1,14 @@
 #!/bin/bash
 # oxp3-steamos-fixes - ONEXPLAYER 3 (Intel Panther Lake) SteamOS fix pack
-# Version: v1.5.0 (2026-09-24)     License: MIT (see LICENSE)     Author: HANA & Claude
+# Version: v1.5.1 (2026-09-25)     License: MIT (see LICENSE)     Author: HANA & Claude
 # Tested on: SteamOS 3.10 main build 20260827.1000, kernel 7.2.0-valve1-1-neptune-72, OXP3 BIOS 5.09,
 #            panel Samsung SDC AMS881KB01-0, SSD Predator GM7 1TB (Biwin/Maxio 1dee:1602)
 # v1.1.0: gamescope HDR lua now also registers real 30-144Hz dynamic_modegen (this panel has genuine
 #         continuous VRR; the v1.0.1 lua declared dynamic_refresh_rates but never shipped the
 #         matching dynamic_modegen function, so no extra Hz options ever actually appeared in the
 #         Steam Performance panel's per-game refresh-rate selector).
+# v1.5.1: the release is one archive, oxp3-fix.tar.gz (extract it in ~ to get ~/oxp3-fix). The gyro step takes the patched
+#         InputPlumber from the archive next to the script and only downloads the archive when that copy is missing.
 # v1.5.0: new OPTIONAL, EXPERIMENTAL step 7, gyroscope (--gyro, or answer y when asked). The BMI260 IMU is invisible to the kernel
 #         (its ACPI node is named 10EC5280, which the bmi160 driver claims and fails on), so an ACPI table override renames it
 #         and the bmi270 driver binds. A patched InputPlumber 0.78.0 (gyro/ in the repo, prebuilt binary from the GitHub release,
@@ -35,7 +37,7 @@
 #         the hid-oxp sysfs (driver pages 1-2 only, never raw hidraw); new --mcu-restore (DANGEROUS, explicit, confirmed)
 #         rewrites MCU button-table page 3 (Home 0x24 + factory-default 0x21/0x25-0x2B) to recover a Home/Xbox
 #         key that went silent after a foreign tool overwrote the MCU table.
-OXP3_FIXES_VERSION="v1.5.0 (2026-09-24)"
+OXP3_FIXES_VERSION="v1.5.1 (2026-09-25)"
 TESTED_STEAMOS_BUILD="20260827.1000"
 TESTED_KERNEL_PREFIX="7.2.0-valve1"
 # ============================================================================
@@ -119,7 +121,8 @@ GRUB_IMU_FILE=/etc/default/grub.d/oxp3-imu.cfg
 GYRO_BIOS="5.09"                                             # the ACPI override is a patched copy of this BIOS's SSDT26
 GYRO_IP_SERIES="0.78"                                        # the patched build is InputPlumber 0.78.0
 GYRO_BIN_SHA256="1107d95c34863c7865cac64183673135098d77265a32763c22fc7efbc1893aa3"
-GYRO_BIN_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/v1.5.0/inputplumber-oxp3-gyro"
+GYRO_PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/v1.5.1/oxp3-fix.tar.gz"   # release archive holding the binary
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"                  # the extracted release archive, if the script came from it
 ACPI_IMG_SHA256="0e9b716e65978ac7365fda6fddf476a18b352a2d1ed98f4f30c8d3f8558b2113"
 ACPI_IMG_OLD_SHA256="2d1a0a88e4cfe694cd4edc9b0d0a5e28f7f3f5bb9ccdcf7cbf1d5d01a02d42ad"   # earlier build of the same table (long cpio member name)
 
@@ -1026,7 +1029,7 @@ say "   6) $BATT_SH + $BATT_UNIT (battery percentage clamp)   $([ -r /sys/class/
 if [ "$GYRO_REQ" = 0 ]; then
     say "   7) gyro (experimental): REMOVE the ACPI override, the patched InputPlumber and its files (--no-gyro)"
 elif [ "$GYRO_ON" = 1 ]; then
-    say "   7) gyro (experimental): $ACPI_IMG + $GRUB_IMU_FILE (ACPI override, update-grub), patched InputPlumber $(gyro_bin_ok && echo "[present]" || echo "[will be downloaded, 10 MB]") + $GYRO_DROPIN"
+    say "   7) gyro (experimental): $ACPI_IMG + $GRUB_IMU_FILE (ACPI override, update-grub), patched InputPlumber $(gyro_bin_ok && echo "[present]" || echo "[from the release archive]") + $GYRO_DROPIN"
 elif [ "$GYRO_WANT" = 1 ]; then
     say "   7) gyro (experimental): [SKIPPED: $GYRO_BLOCK]"
 else
@@ -1219,19 +1222,23 @@ elif [ "$GYRO_WANT" = 1 ] && [ -n "$GYRO_BLOCK" ]; then
     say "  [skip] gyro (experimental): $GYRO_BLOCK"
 elif [ "$GYRO_ON" = 1 ]; then
     GYRO_OK=1
-    # patched InputPlumber: keep the verified copy, otherwise download it from the release and check its sha256
+    # patched InputPlumber: keep the verified copy, else take it from the release archive next to the script, else download
+    # the archive and extract it; the sha256 is checked every time
     if gyro_bin_ok; then
         say "  [skip] $GYRO_BIN unchanged"
+    elif [ "$SCRIPT_DIR/inputplumber-oxp3-gyro" != "$GYRO_BIN" ] && [ -f "$SCRIPT_DIR/inputplumber-oxp3-gyro" ]         && [ "$(sha256sum "$SCRIPT_DIR/inputplumber-oxp3-gyro" | cut -d' ' -f1)" = "$GYRO_BIN_SHA256" ]; then
+        install -m 755 "$SCRIPT_DIR/inputplumber-oxp3-gyro" "$GYRO_BIN"; say "  [write] $GYRO_BIN (from the release archive, sha256 verified)"; CHANGED=1; IP_RESTART=1
     elif ! command -v curl >/dev/null 2>&1 || ! ip route 2>/dev/null | grep -q '^default'; then
         say "  [error] gyro: the patched InputPlumber is not on this machine and there is no network to download it"; GYRO_OK=0
     else
-        say "  [run] downloading the patched InputPlumber ($GYRO_BIN_URL, about 10 MB) ..."
-        if curl -fL --retry 3 --progress-bar -o "$GYRO_BIN.part" "$GYRO_BIN_URL" \
-            && [ "$(sha256sum "$GYRO_BIN.part" | cut -d' ' -f1)" = "$GYRO_BIN_SHA256" ]; then
-            mv -f "$GYRO_BIN.part" "$GYRO_BIN"; chmod +x "$GYRO_BIN"; say "  [write] $GYRO_BIN (sha256 verified)"; CHANGED=1; IP_RESTART=1
+        say "  [run] downloading the release archive ($GYRO_PKG_URL, about 4 MB) ..."
+        _tmp="$(mktemp -d "${TMPDIR:-/tmp}/oxp3-pkg.XXXXXX")"
+        if curl -fL --retry 3 --progress-bar -o "$_tmp/pkg.tar.gz" "$GYRO_PKG_URL"             && tar -xzf "$_tmp/pkg.tar.gz" -C "$_tmp" oxp3-fix/inputplumber-oxp3-gyro             && [ "$(sha256sum "$_tmp/oxp3-fix/inputplumber-oxp3-gyro" | cut -d' ' -f1)" = "$GYRO_BIN_SHA256" ]; then
+            install -m 755 "$_tmp/oxp3-fix/inputplumber-oxp3-gyro" "$GYRO_BIN"; say "  [write] $GYRO_BIN (sha256 verified)"; CHANGED=1; IP_RESTART=1
         else
-            rm -f "$GYRO_BIN.part"; say "  [error] gyro: download failed or the sha256 does not match"; GYRO_OK=0
+            say "  [error] gyro: download failed or the sha256 does not match"; GYRO_OK=0
         fi
+        rm -rf "$_tmp"
     fi
     if [ "$GYRO_OK" = 1 ] && ldd "$GYRO_BIN" 2>&1 | grep -q 'not found'; then
         say "  [error] gyro: the patched InputPlumber needs libraries this SteamOS build does not have:"; ldd "$GYRO_BIN" 2>&1 | grep 'not found'; GYRO_OK=0

@@ -15,7 +15,7 @@ Opt-in step 7 of the fix pack (`./oxp3-apply-fixes.sh --gyro`). This directory h
 | File | Purpose |
 |---|---|
 | `/boot/acpi_override.img` + `/etc/default/grub.d/oxp3-imu.cfg` | the ACPI override, loaded as an early initrd (reboot needed the first time) |
-| `~/oxp3-fix/inputplumber-oxp3-gyro` | the patched InputPlumber, downloaded from the GitHub release and checked against a sha256 pinned in the script |
+| `~/oxp3-fix/inputplumber-oxp3-gyro` | the patched InputPlumber from the release archive `oxp3-fix.tar.gz` (downloaded only if missing), checked against a sha256 pinned in the script |
 | `~/oxp3-fix/oxp3-inputplumber-launch.sh` + `/etc/systemd/system/inputplumber.service.d/oxp3-gyro-fork.conf` | systemd drop-in that starts the patched build through a launcher; the launcher starts the **stock** `/usr/bin/inputplumber` instead when the patched binary lacks a library or the stock InputPlumber is no longer the 0.78 series, so an OS update cannot leave you without a gamepad |
 | `/etc/inputplumber/oxp3-gyro-steer.conf` | tuning, re-read every 2 s without a restart; never overwritten once it exists |
 | `~/oxp3-fix/gyro.enabled` / `gyro.declined` | remembers your choice so re-runs after a SteamOS update keep it (or do not ask again) |
