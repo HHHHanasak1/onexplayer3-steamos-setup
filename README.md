@@ -77,7 +77,7 @@ This is the recovery-image method that works on this machine. You need a Windows
 
 ### Installing and running the fix pack
 
-You do not need to clone the repository: the script is self-contained (the volume-key and battery helpers are embedded in it). Download it from the latest release on the deck and run it:
+Download it from the latest release on the deck and run it:
 
 ```bash
 mkdir -p ~/oxp3-fix && cd ~/oxp3-fix
