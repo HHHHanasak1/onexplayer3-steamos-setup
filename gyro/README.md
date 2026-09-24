@@ -8,7 +8,7 @@ Opt-in step 7 of the fix pack (`./oxp3-apply-fixes.sh --gyro`). This directory h
 
 1. **The kernel cannot see the sensor.** The IMU is a Bosch BMI260 on I2C bus 2 (address 0x68), but the firmware names its ACPI node `10EC5280`. That id belongs to the `bmi160_i2c` driver, which fails with `Error reading chip id` (-121). `bmi270_i2c` supports the BMI260 but only matches the ids `BMI0160` and `BMI0260`. An **ACPI table override** ships a copy of the firmware's `SSDT26` (`Rtd3` / `I2C_DEVT`) with the node renamed to `BMI0260`, and the kernel then exposes a normal IIO device. The table is specific to **BIOS 5.09**, so the script refuses to install it on other versions (`--force` overrides). Source: [`SSDT26-oxp3-imu.dsl`](SSDT26-oxp3-imu.dsl); the compiled table is embedded in `oxp3-apply-fixes.sh` as an `acpi_override.img` cpio image loaded through `GRUB_EARLY_INITRD_LINUX_CUSTOM`.
 2. **InputPlumber needs to understand the sensor.** A [patched InputPlumber 0.78.0](inputplumber-0.78.0-oxp3-gyro.patch) adds a mount matrix and bias options to the IIO source, orders the gyro fields the way Steam's Steam Deck HID driver reads them, and feeds them to the virtual Steam Deck controller (`deck-uhid`) at Steam's fixed 4 ms report interval. The yaml entry for the IMU gets the matching keys (the fix pack writes them only when gyro is enabled).
-3. **Drift handling.** The new `gyro_steer` module passes the yaw rate through a slow high-pass: it mirrors the angle Steam integrates and folds a small return rate into the stream, so a constant bias becomes a small bounded offset instead of a runaway drift. Response shaping (`curve`, `gain`, `range`) gives small tilts more reach than large ones. It can also learn the bias while the device rests, or map the angle to the left stick instead (`mode=stick`).
+3. **Drift handling.** The new `gyro_steer` module passes the yaw rate through a slow high-pass: it mirrors the angle Steam integrates and folds a small return rate into the stream, so a constant bias becomes a small bounded offset instead of a runaway drift. Optional response shaping (`curve`, `gain`, `range`, off by default) can give small tilts more reach than large ones. It can also learn the bias while the device rests, or map the angle to the left stick instead (`mode=stick`).
 
 ## Files the fix pack installs
 
@@ -24,7 +24,7 @@ Opt-in step 7 of the fix pack (`./oxp3-apply-fixes.sh --gyro`). This directory h
 
 ## Tuning
 
-Edit `/etc/inputplumber/oxp3-gyro-steer.conf` (root); the comments in the file explain each key. The shipped values (`tau=20`, `range=45`, `curve=0.5`, `gain=0.85`) suit gyro-to-joystick steering: small tilts are boosted to about 1.5x near the centre, tapering to about 0.5x at 45 degrees. `curve=0` makes the response linear, lower `gain` calms large angles.
+Edit `/etc/inputplumber/oxp3-gyro-steer.conf` (root); the comments in the file explain each key. The shipped response is linear (`curve=0`, `gain=1.0`) with `tau=20` drift relaxation. `curve` above 0 boosts small tilts (`curve=0.5` gives about 1.5x near the centre, tapering to about 0.5x at `range` degrees) and a lower `gain` calms large angles; these shaping options are available but not enabled by default. The file is only written when it does not exist, so existing installs keep their own values.
 
 ## Building the patched InputPlumber yourself
 
