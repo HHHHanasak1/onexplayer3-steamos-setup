@@ -107,7 +107,7 @@ Each opens a Konsole window that stays open, so you can type the sudo password, 
 Flags: `--yes`, `--force`, `--force-nvme`, `--no-wifi`, `--gyro`, `--no-gyro`.
 
 - SteamOS updates may make the root filesystem read-only again, reset `/etc` and remove installed packages. Re-run the script afterwards; it is idempotent. If the filesystem is read-only, the script runs `steamos-readonly disable` first.
-- On a machine without working Wi-Fi, connect USB Ethernet or USB tethering before running the script, so the script can download `linux-firmware-intel`. Without any network the step is skipped with a message and the other fixes still run. A reboot is needed afterwards so the driver loads the new firmware.
+- On a machine without working Wi-Fi, connect USB Ethernet or USB tethering before running the script, so the script can download `linux-firmware-intel`. The downloaded package is cached in `~/.cache/oxp3-fix`, which survives SteamOS updates, so every later run (for example after an update wiped the firmware again) works without any network. Without network and without the cache the step is skipped with a message and the other fixes still run. A reboot is needed afterwards so the driver loads the new firmware.
 - Remove earlier hacks of your own first, such as boot-time `chvt` scripts or a masked `powerbuttond`, because they can interfere.
 - Do not unbind or rebind hid-oxp, and do not write raw commands to the `1a86:fe00` hidraw device.
 - After enabling InputPlumber mid-session, the controller page in Steam may need `sudo systemctl restart inputplumber` or a Steam restart before it shows the controller.
@@ -142,6 +142,7 @@ Suspend/resume failures were reproduced 7 out of 7 times with `rtcwake`-timed su
 
 ### Changelog
 
+- **v1.6.1 (2026-09-25)**: the Wi-Fi/Bluetooth step uses the cached firmware package when there is no network, so Wi-Fi comes back after a SteamOS update without USB tethering.
 - **v1.6.0 (2026-09-25)**: TDP sync (step 8). The GPU obeys the MSR package PL1, which the firmware leaves at 25 W while TDP tools only set the MMIO PL1, so the GPU was throttled even with a 50 W TDP; a small root service now keeps the MSR PL1 equal to the MMIO PL1. README note on chargers for high TDPs.
 - **v1.5.1 (2026-09-25)**: the release is a single archive, `oxp3-fix.tar.gz`, that extracts to `~/oxp3-fix`; the gyro step uses the patched InputPlumber from it.
 - **v1.5.0 (2026-09-24)**: experimental, opt-in gyroscope support (step 7, `--gyro` / `--no-gyro`): ACPI override so the kernel sees the BMI260, patched InputPlumber 0.78.0 (source and build notes in `gyro/`, binary in the release, sha256 pinned, automatic fallback to the stock binary), and a drift-relaxing rate filter. The script is now distributed as a release asset, so cloning the repository is not needed. `--help` now prints the complete usage text.
