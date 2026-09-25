@@ -1,12 +1,14 @@
 #!/bin/bash
 # oxp3-steamos-fixes - ONEXPLAYER 3 (Intel Panther Lake) SteamOS fix pack
-# Version: v1.6.0 (2026-09-25)     License: MIT (see LICENSE)     Author: HANA & Claude
+# Version: v1.6.1 (2026-09-25)     License: MIT (see LICENSE)     Author: HANA & Claude
 # Tested on: SteamOS 3.10 main build 20260827.1000, kernel 7.2.0-valve1-1-neptune-72, OXP3 BIOS 5.09,
 #            panel Samsung SDC AMS881KB01-0, SSD Predator GM7 1TB (Biwin/Maxio 1dee:1602)
 # v1.1.0: gamescope HDR lua now also registers real 30-144Hz dynamic_modegen (this panel has genuine
 #         continuous VRR; the v1.0.1 lua declared dynamic_refresh_rates but never shipped the
 #         matching dynamic_modegen function, so no extra Hz options ever actually appeared in the
 #         Steam Performance panel's per-game refresh-rate selector).
+# v1.6.1: step 0 works offline: after a SteamOS update the Wi-Fi firmware is gone again, but the linux-firmware-intel package
+#         cached in ~/.cache/oxp3-fix (in /home, survives updates) is now used without any network connection.
 # v1.6.0: new step 8, TDP sync. The firmware leaves the MSR package PL1 (intel-rapl:0) at 25 W while TDP tools and the
 #         firmware only set the MMIO package PL1; the GPU obeys the MSR PL1, so it was throttled ("pl1") at ~33 W even with
 #         a 50 W TDP. A small root service copies the MMIO PL1 into the MSR PL1 whenever they differ.
@@ -40,7 +42,7 @@
 #         the hid-oxp sysfs (driver pages 1-2 only, never raw hidraw); new --mcu-restore (DANGEROUS, explicit, confirmed)
 #         rewrites MCU button-table page 3 (Home 0x24 + factory-default 0x21/0x25-0x2B) to recover a Home/Xbox
 #         key that went silent after a foreign tool overwrote the MCU table.
-OXP3_FIXES_VERSION="v1.6.0 (2026-09-25)"
+OXP3_FIXES_VERSION="v1.6.1 (2026-09-25)"
 TESTED_STEAMOS_BUILD="20260827.1000"
 TESTED_KERNEL_PREFIX="7.2.0-valve1"
 # ============================================================================
@@ -127,7 +129,7 @@ GRUB_IMU_FILE=/etc/default/grub.d/oxp3-imu.cfg
 GYRO_BIOS="5.09"                                             # the ACPI override is a patched copy of this BIOS's SSDT26
 GYRO_IP_SERIES="0.78"                                        # the patched build is InputPlumber 0.78.0
 GYRO_BIN_SHA256="1107d95c34863c7865cac64183673135098d77265a32763c22fc7efbc1893aa3"
-GYRO_PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/v1.6.0/oxp3-fix.tar.gz"   # release archive holding the binary
+GYRO_PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/v1.6.1/oxp3-fix.tar.gz"   # release archive holding the binary
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"                  # the extracted release archive, if the script came from it
 ACPI_IMG_SHA256="0e9b716e65978ac7365fda6fddf476a18b352a2d1ed98f4f30c8d3f8558b2113"
 ACPI_IMG_OLD_SHA256="2d1a0a88e4cfe694cd4edc9b0d0a5e28f7f3f5bb9ccdcf7cbf1d5d01a02d42ad"   # earlier build of the same table (long cpio member name)
@@ -1131,14 +1133,18 @@ sudo -v
 # extract only the missing families into /usr/lib/firmware; existing files are never overwritten and no package is
 # replaced. Needs a writable rootfs and some network connection (USB Ethernet / USB tethering while Wi-Fi is down).
 WIFI_FAILED=0
+# the package is cached in /home, which survives OS updates, so after an update Wi-Fi can be restored without any network
+FW_CACHE="$USER_HOME/.cache/oxp3-fix"
+FW_CACHED="$(ls -t "$FW_CACHE"/linux-firmware-intel-*.pkg.tar.zst 2>/dev/null | head -n1 || true)"
+HAVE_NET=0; ip route 2>/dev/null | grep -q '^default' && HAVE_NET=1
 if [ "$SKIP_WIFI" = 1 ]; then
     say "  [skip] Wi-Fi firmware step disabled (--no-wifi)"
 elif [ "$WIFI_MISSING" != 1 ] && [ "$BT_MISSING" != 1 ]; then
     say "  [skip] Wi-Fi/Bluetooth firmware: nothing missing"
 elif ! command -v pacman >/dev/null 2>&1; then
     say "  [skip] pacman not found, cannot locate linux-firmware-intel"; WIFI_FAILED=1
-elif ! ip route 2>/dev/null | grep -q '^default'; then
-    say "  [skip] no network connection, cannot download linux-firmware-intel."
+elif [ "$HAVE_NET" != 1 ] && [ -z "$FW_CACHED" ]; then
+    say "  [skip] no network connection and no cached package, cannot download linux-firmware-intel."
     say "         Connect USB Ethernet or USB tethering and run this script again."
     WIFI_FAILED=1
 else
@@ -1148,7 +1154,12 @@ else
         sudo steamos-readonly disable
         RO_STATUS=disabled
     fi
-    FW_URL="$(pacman -Sp linux-firmware-intel 2>/dev/null | grep -m1 '^http' || true)"
+    if [ "$HAVE_NET" != 1 ]; then
+        say "  [offline] no network, using the cached $(basename "$FW_CACHED")"
+        FW_URL="$FW_CACHED"
+    else
+        FW_URL="$(pacman -Sp linux-firmware-intel 2>/dev/null | grep -m1 '^http' || true)"
+    fi
     if [ -z "$FW_URL" ]; then
         say "  [run] pacman -Sy   (package database sync, needed to locate linux-firmware-intel)"
         sudo pacman -Sy >/dev/null 2>&1 || true
@@ -1157,7 +1168,7 @@ else
     if [ -z "$FW_URL" ]; then
         say "  [error] linux-firmware-intel not found in the configured repositories"; WIFI_FAILED=1
     else
-        FW_CACHE="$USER_HOME/.cache/oxp3-fix"; mkdir -p "$FW_CACHE"
+        mkdir -p "$FW_CACHE"
         FW_PKG="$FW_CACHE/$(basename "$FW_URL")"
         if [ ! -s "$FW_PKG" ]; then
             say "  [run] downloading $(basename "$FW_URL") (about 130 MB) ..."
