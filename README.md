@@ -121,13 +121,12 @@ The fix pack does not touch lighting: the kernel hid-oxp LED interface has no ef
 
 ### Known issues and limitations
 
-As of 2026-09-24 the stable fixes have been in daily use for about half a month, including across the 20260921.1000 SteamOS update (re-run the script after an update). Apart from the gyroscope below, the only known issue is the rare speaker case.
+As of 2026-09-24 the stable fixes have been in daily use for about half a month, including across the 20260921.1000 SteamOS update (re-run the script after an update). Apart from the gyroscope below, no stability problems are known.
 
 - **Gyroscope (experimental, opt-in): usable, but drift is only reduced.** The BMI260's temperature-dependent bias about the vertical axis cannot be corrected with gravity, so flat-steering use would drift by several degrees per minute. The patched InputPlumber makes Steam's integrated angle relax towards the centre with a 20 s time constant, so a constant bias ends up as a bounded offset of about 1-2 degrees instead of a runaway, at the cost of a slow return when you hold a turn for a long time. Static compensation and automatic calibration on their own were tried without a usable result. Optional response shaping (`curve`, `gain`) exists but is off by default. See [`gyro/README.md`](gyro/README.md) and `issues/03-bmi160.md`.
 - **High TDP needs a strong charger.** Whenever the charger reports disconnected, the firmware resets the TDP to its battery limits (35 W / 52 W) and a TDP plugin puts its own value back a little later. With a charger that cannot cover the SoC, the screen and charging at the same time, the adapter flaps between connected and disconnected (seen: 13 times in 4 minutes at a 50 W TDP, the battery still discharging at about 34 W while plugged in), so the limit bounces between 35 and 50 W. For TDPs around 50 W use a charger that covers all of it; a 100 W USB PD charger is recommended.
 - **Volume key root cause** is in the embedded controller firmware. A firmware update from the vendor would remove the need for the forwarder.
 - **HDR uses the gamma-2.2 path.** A true PQ path (`xe.enable_dpcd_backlight=1`) has not been tested.
-- **Speakers are very occasionally silent after boot.** A reboot fixes it. Not investigated yet.
 - **Lighting is not part of this pack**, see the Lighting section above. Never unbind or rebind hid-oxp: it triggers a kernel Oops (`issues/hid_oxp_oops_rebind.txt`).
 
 Upstream bug drafts are in `issues/`.
