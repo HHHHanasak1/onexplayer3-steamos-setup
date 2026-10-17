@@ -267,6 +267,7 @@ gamescope.config.known_displays.oxp3_sdc_oled = {
     hdr = {
         supported = true,
         force_enabled = true,
+        content_driven = true,
         eotf = gamescope.eotf.gamma22,
         max_content_light_level = 1100,
         max_frame_average_luminance = 475,
