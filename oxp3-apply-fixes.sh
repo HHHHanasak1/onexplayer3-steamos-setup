@@ -1,12 +1,15 @@
 #!/bin/bash
 # oxp3-steamos-fixes - ONEXPLAYER 3 (Intel Panther Lake) SteamOS fix pack
-# Version: 20261018     License: MIT (see LICENSE)     Author: HANA & Claude
+# Version: 20261018-2     License: MIT (see LICENSE)     Author: HANA & Claude
 # Tested on: SteamOS 3.10 main build 20260827.1000, kernel 7.2.0-valve1-1-neptune-72, OXP3 BIOS 5.09,
 #            panel Samsung SDC AMS881KB01-0, SSD Predator GM7 1TB (Biwin/Maxio 1dee:1602)
 # v1.1.0: gamescope HDR lua now also registers real 30-144Hz dynamic_modegen (this panel has genuine
 #         continuous VRR; the v1.0.1 lua declared dynamic_refresh_rates but never shipped the
 #         matching dynamic_modegen function, so no extra Hz options ever actually appeared in the
 #         Steam Performance panel's per-game refresh-rate selector).
+# 20261018-2: new optional step 14, SimpleDeckyTDP-Intel (contributed by kas5852, PR #24): a SimpleDeckyTDP fork whose
+#         CPU Boost is Off / Smart / Full per game. A normal run asks once; the zip comes with the release archive; an
+#         installed SimpleDeckyTDP is replaced only after the user confirms.
 # 20261018: new step 13, OLED panel fix for BIOS 5.11 and later (contributed by kas5852, PR #15). Content-driven HDR
 #         in the gamescope lua (kas5852, PR #22): SDR games keep the panel in SDR and scan out directly. The overlay's CPU
 #         power is now the CPU cores only (RAPL PP0): the package counter it showed before includes the GPU, which the
@@ -64,7 +67,7 @@
 #         the hid-oxp sysfs (driver pages 1-2 only, never raw hidraw); new --mcu-restore (DANGEROUS, explicit, confirmed)
 #         rewrites MCU button-table page 3 (Home 0x24 + factory-default 0x21/0x25-0x2B) to recover a Home/Xbox
 #         key that went silent after a foreign tool overwrote the MCU table.
-OXP3_FIXES_VERSION="20261018"
+OXP3_FIXES_VERSION="20261018-2"
 TESTED_STEAMOS_BUILD="20260827.1000"
 TESTED_KERNEL_PREFIX="7.2.0-valve1"
 # ============================================================================
