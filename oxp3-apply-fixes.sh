@@ -1,12 +1,16 @@
 #!/bin/bash
 # oxp3-steamos-fixes - ONEXPLAYER 3 (Intel Panther Lake) SteamOS fix pack
-# Version: 20261016     License: MIT (see LICENSE)     Author: HANA & Claude
+# Version: 20261018     License: MIT (see LICENSE)     Author: HANA & Claude
 # Tested on: SteamOS 3.10 main build 20260827.1000, kernel 7.2.0-valve1-1-neptune-72, OXP3 BIOS 5.09,
 #            panel Samsung SDC AMS881KB01-0, SSD Predator GM7 1TB (Biwin/Maxio 1dee:1602)
 # v1.1.0: gamescope HDR lua now also registers real 30-144Hz dynamic_modegen (this panel has genuine
 #         continuous VRR; the v1.0.1 lua declared dynamic_refresh_rates but never shipped the
 #         matching dynamic_modegen function, so no extra Hz options ever actually appeared in the
 #         Steam Performance panel's per-game refresh-rate selector).
+# 20261018: new step 13, OLED panel fix for BIOS 5.11 and later (contributed by kas5852, PR #15). Content-driven HDR
+#         in the gamescope lua (kas5852, PR #22): SDR games keep the panel in SDR and scan out directly. The overlay's CPU
+#         power is now the CPU cores only (RAPL PP0): the package counter it showed before includes the GPU, which the
+#         overlay lists separately, so CPU + GPU looked like more than the TDP.
 # 20261016: new step 10, CPU and GPU power/temperature in the performance overlay: a root service publishes coarse
 #         (0.5 s, 10 mJ) world-readable copies of the package and PP1 energy counters, and a patched mangoapp (binary in the
 #         release archive, sha256 pinned, falls back to the stock one) reads GPU power from PP1 and the GPU temperature
@@ -59,7 +63,7 @@
 #         the hid-oxp sysfs (driver pages 1-2 only, never raw hidraw); new --mcu-restore (DANGEROUS, explicit, confirmed)
 #         rewrites MCU button-table page 3 (Home 0x24 + factory-default 0x21/0x25-0x2B) to recover a Home/Xbox
 #         key that went silent after a foreign tool overwrote the MCU table.
-OXP3_FIXES_VERSION="20261016"
+OXP3_FIXES_VERSION="20261018"
 TESTED_STEAMOS_BUILD="20260827.1000"
 TESTED_KERNEL_PREFIX="7.2.0-valve1"
 # ============================================================================
@@ -154,7 +158,7 @@ MANGO_BIN="$USER_HOME/oxp3-fix/mangoapp-oxp3"               # patched mangoapp (
 MANGO_LAUNCH="$USER_HOME/oxp3-fix/oxp3-mangoapp-launch.sh"   # starts MANGO_BIN, or the stock mangoapp when it cannot run
 MANGO_DROPIN=/etc/systemd/user/gamescope-mangoapp.service.d/oxp3-mangoapp.conf
 MANGO_FOR="0.8.3.rc1.r24.g33c2c7dd"                         # the SteamOS mangohud package the patch was built from
-MANGO_SHA256="beaae37cb2defa1af0cf5b7f6a0eed31fc7d4796a58743764fd74f20b418e246"
+MANGO_SHA256="c3798b7a7db43c27862a439bac7e2810ebc2e1b71d3d33e01635597b1e6ab10b"
 DMC_NAME=i915/xe3lpd_dmc.bin                                 # the Panther Lake display controller firmware
 DMC_OVERRIDE=/usr/lib/firmware/updates/$DMC_NAME.zst         # firmware/updates takes precedence over the packaged file
 DMC_SHA256="150eaa60a776e489f69e6f334d4c12216c0d686f3a53ac2228d0a6ce48f8add9"   # v2.20 (.zst) from linux-firmware-neptune 20260910
@@ -177,7 +181,7 @@ GRUB_IMU_FILE=/etc/default/grub.d/oxp3-imu.cfg
 GYRO_BIOS="5.09"                                             # the ACPI override is a patched copy of this BIOS's SSDT26
 GYRO_IP_SERIES="0.78"                                        # the patched build is InputPlumber 0.78.0
 GYRO_BIN_SHA256="1107d95c34863c7865cac64183673135098d77265a32763c22fc7efbc1893aa3"
-PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261016/oxp3-fix.tar.gz"
+PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261018/oxp3-fix.tar.gz"
 GYRO_PKG_URL="$PKG_URL"   # release archive holding the binary
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"                  # the extracted release archive, if the script came from it
 ACPI_IMG_SHA256="0e9b716e65978ac7365fda6fddf476a18b352a2d1ed98f4f30c8d3f8558b2113"
@@ -782,7 +786,8 @@ RAPL_PY_CONTENT=$(cat <<'EOT'
 # Fix: a root service opens the real counters once, then bind-mounts world-readable copies over the attributes and
 # refreshes them twice a second, rounded down to 10 mJ. That is plenty for a power reading over the overlay's 500 ms
 # window, and useless for the side channel, which needs thousands of samples per second. Covered zones:
-#   intel-rapl:0    package-0  CPU power (read by stock MangoHud)
+#   intel-rapl:0    package-0  whole-chip power (read by stock MangoHud as CPU power; includes the GPU)
+#   intel-rapl:0:0  core       RAPL PP0, the CPU cores (read by the patched mangoapp as CPU power)
 #   intel-rapl:0:1  uncore     RAPL PP1, the graphics power plane (read by the patched mangoapp for the integrated GPU)
 # Every other RAPL counter stays root-only. The copies are monotonic counters that never wrap.
 # Run as a root service (see the fix pack). --stop removes the overlays (systemctl stop does it too).
@@ -792,7 +797,7 @@ import sys
 import time
 
 BASE = "/sys/class/powercap"
-ZONES = [("intel-rapl:0", "package-0"), ("intel-rapl:0:1", "uncore")]
+ZONES = [("intel-rapl:0", "package-0"), ("intel-rapl:0:0", "core"), ("intel-rapl:0:1", "uncore")]
 RUNDIR = "/run/oxp3-rapl"
 PERIOD = 0.5         # s between refreshes
 QUANTUM = 10000      # uJ (10 mJ) resolution of the copies
@@ -876,7 +881,7 @@ EOT
 
 RAPL_UNIT_CONTENT=$(cat <<'EOT'
 [Unit]
-Description=OXP3: coarse world-readable copies of the CPU package and GPU (PP1) energy counters for the performance overlay
+Description=OXP3: coarse world-readable copies of the package, CPU core (PP0) and GPU (PP1) energy counters for the performance overlay
 # see the header of __RAPL_PY__ ; revert: systemctl disable --now oxp3-rapl-overlay.service
 After=basic.target
 Before=display-manager.service
