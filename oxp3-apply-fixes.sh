@@ -10,7 +10,7 @@
 # 20261018: new step 13, OLED panel fix for BIOS 5.11 and later (contributed by kas5852, PR #15). Content-driven HDR
 #         in the gamescope lua (kas5852, PR #22): SDR games keep the panel in SDR and scan out directly. The overlay's CPU
 #         power is now the CPU cores only (RAPL PP0): the package counter it showed before includes the GPU, which the
-#         overlay lists separately, so CPU + GPU looked like more than the TDP. A new SoC line after the GPU (levels 2-4)
+#         overlay lists separately, so CPU + GPU looked like more than the TDP. A new SoC item after CPU and GPU (levels 2-4)
 #         shows the whole-package power, which is what the TDP limits.
 # 20261016: new step 10, CPU and GPU power/temperature in the performance overlay: a root service publishes coarse
 #         (0.5 s, 10 mJ) world-readable copies of the package and PP1 energy counters, and a patched mangoapp (binary in the
@@ -159,7 +159,7 @@ MANGO_BIN="$USER_HOME/oxp3-fix/mangoapp-oxp3"               # patched mangoapp (
 MANGO_LAUNCH="$USER_HOME/oxp3-fix/oxp3-mangoapp-launch.sh"   # starts MANGO_BIN, or the stock mangoapp when it cannot run
 MANGO_DROPIN=/etc/systemd/user/gamescope-mangoapp.service.d/oxp3-mangoapp.conf
 MANGO_FOR="0.8.3.rc1.r24.g33c2c7dd"                         # the SteamOS mangohud package the patch was built from
-MANGO_SHA256="ca6544afa23c8a505ba18d77c8925f0575b9116284bc5b41a854f77c72a3902e"
+MANGO_SHA256="f2fe6fc2eaf91146cff53dc9faad3ce9323c7e8d8f9f58c01a30ebdc877c9c5b"
 DMC_NAME=i915/xe3lpd_dmc.bin                                 # the Panther Lake display controller firmware
 DMC_OVERRIDE=/usr/lib/firmware/updates/$DMC_NAME.zst         # firmware/updates takes precedence over the packaged file
 DMC_SHA256="150eaa60a776e489f69e6f334d4c12216c0d686f3a53ac2228d0a6ce48f8add9"   # v2.20 (.zst) from linux-firmware-neptune 20260910

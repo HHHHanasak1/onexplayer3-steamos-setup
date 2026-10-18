@@ -6,7 +6,7 @@ Part of step 10 of the fix pack. The performance overlay (mangoapp, from MangoHu
 
 - **GPU power** comes from RAPL PP1 (`/sys/class/powercap/intel-rapl:0:1`, named `uncore` by Linux), the graphics power plane on Intel client CPUs. It is an estimate made by the CPU, like the CPU package power, and it may include closely related blocks (Intel does not document the exact boundary on Panther Lake). The fix pack's `oxp3-rapl-overlay.service` publishes a coarse copy of this counter, because the raw one is root-only.
 - **CPU power** comes from RAPL PP0 (`intel-rapl:0:0`, `core`), the CPU cores, instead of the whole package (`intel-rapl:0`), which includes the GPU. Otherwise the GPU's share would be counted twice in the overlay. The fix pack publishes a coarse copy of this counter too. Without a readable `core` zone the package is used, as in stock MangoHud.
-- **SoC power** is a new line right after the GPU: the whole package (`intel-rapl:0`), that is CPU cores, GPU and the shared blocks, which is what the TDP limits. It appears wherever GPU power is shown (Steam overlay levels 2 to 4).
+- **SoC power** is a new item after the CPU and GPU items (with a separator in the horizontal level-2 layout): the whole package (`intel-rapl:0`), that is CPU cores, GPU and the shared blocks, which is what the TDP limits. It appears wherever GPU power is shown (Steam overlay levels 2 to 4).
 - **GPU temperature** is the CPU package temperature (`coretemp`, "Package id 0"): the GPU is on the same chip and has no sensor of its own, so the GPU and CPU temperatures in the overlay are the same value.
 
 ## How it is installed

@@ -197,18 +197,20 @@ index f46faba..18a52ba 100644
 2.55.0
 
 
-From 9e3654906728bcc4d8c64ac30d29f3e3bd73fb4b Mon Sep 17 00:00:00 2001
+From 871651eea9dd9a7ef67f8a7998c9cc85b459bc39 Mon Sep 17 00:00:00 2001
 From: x <x@x>
 Date: Sun, 18 Oct 2026 10:26:05 +0900
-Subject: [PATCH 4/4] hud: SoC (package) power after the GPU for integrated xe
- GPUs
+Subject: [PATCH 4/4] hud: SoC (package) power element after the CPU and GPU
+ for integrated xe GPUs
 
 ---
- src/gpu_fdinfo.cpp     | 28 ++++++++++++++++++++++++++++
- src/gpu_fdinfo.h       |  6 ++++++
+ src/gpu_fdinfo.cpp     | 28 ++++++++++++++++++++++++
+ src/gpu_fdinfo.h       |  9 ++++++++
  src/gpu_metrics_util.h |  1 +
- src/hud_elements.cpp   | 18 ++++++++++++++++++
- 4 files changed, 53 insertions(+)
+ src/hud_elements.cpp   | 48 ++++++++++++++++++++++++++++++++++++++++++
+ src/hud_elements.h     |  2 ++
+ src/overlay_params.cpp |  1 +
+ 6 files changed, 89 insertions(+)
 
 diff --git a/src/gpu_fdinfo.cpp b/src/gpu_fdinfo.cpp
 index 90065c1..5fb85f1 100644
@@ -264,10 +266,10 @@ index 90065c1..5fb85f1 100644
  
          metrics.CoreClock = get_gpu_clock();
 diff --git a/src/gpu_fdinfo.h b/src/gpu_fdinfo.h
-index f5eada9..4c3654d 100644
+index f5eada9..64d6cad 100644
 --- a/src/gpu_fdinfo.h
 +++ b/src/gpu_fdinfo.h
-@@ -97,6 +97,12 @@ private:
+@@ -97,6 +97,15 @@ private:
      uint64_t igpu_last_energy = 0;
      uint64_t igpu_last_time = 0;
      float igpu_power = 0;
@@ -277,6 +279,9 @@ index f5eada9..4c3654d 100644
 +    uint64_t soc_last_time = 0;
 +    float soc_power = 0;
 +    float get_soc_power();
++public:
++    bool has_soc_power() const { return soc_available; }
++private:
      bool find_igpu_sensors();
  
      std::ifstream gpu_clock_stream;
@@ -293,34 +298,89 @@ index b5c1075..214a7df 100644
      gpu_metrics()
          : load(0), temp(0), junction_temp(0), memory_temp(0),
 diff --git a/src/hud_elements.cpp b/src/hud_elements.cpp
-index 767f81b..3ba7618 100644
+index 767f81b..6bca7dc 100644
 --- a/src/hud_elements.cpp
 +++ b/src/hud_elements.cpp
-@@ -414,6 +414,24 @@ void HudElements::gpu_stats(){
-             }
-             if (!HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_horizontal])
-                 ImGui::TableNextRow();
-+
-+            if (HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_gpu_power] && gpu->metrics.soc_power > 0) {
-+                ImguiNextColumnFirstItem();
-+                HUDElements.TextColored(HUDElements.colors.engine, "SoC");
-+                ImguiNextColumnOrNewRow();
-+                char str[16];
-+                snprintf(str, sizeof(str), "%.1f", gpu->metrics.soc_power);
-+                if (strlen(str) > 4)
-+                    right_aligned_text(text_color, HUDElements.ralign_width, "%.0f", gpu->metrics.soc_power);
-+                else
-+                    right_aligned_text(text_color, HUDElements.ralign_width, "%.1f", gpu->metrics.soc_power);
-+                ImGui::SameLine(0, 1.0f);
-+                ImGui::PushFont(HUDElements.sw_stats->font_small);
-+                HUDElements.TextColored(HUDElements.colors.text, "W");
-+                ImGui::PopFont();
-+                if (!HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_horizontal])
-+                    ImGui::TableNextRow();
-+            }
-         }
+@@ -418,6 +418,54 @@ void HudElements::gpu_stats(){
      }
  }
+ 
++// The whole SoC (RAPL package) power of an integrated xe GPU, as its own element after the CPU and GPU ones (see
++// place_soc_element), so the horizontal layout separates it like any other element.
++static std::shared_ptr<GPU> soc_power_gpu()
++{
++    if (!gpus)
++        return nullptr;
++    for (auto& gpu : gpus->selected_gpus())
++        if (gpu->fdinfo && gpu->fdinfo->has_soc_power())
++            return gpu;
++    return nullptr;
++}
++
++void HudElements::soc_stats(){
++    auto gpu = soc_power_gpu();
++    if (!gpu)
++        return;
++    ImguiNextColumnFirstItem();
++    HUDElements.TextColored(HUDElements.colors.engine, "SoC");
++    ImguiNextColumnOrNewRow();
++    auto text_color = HUDElements.colors.text;
++    char str[16];
++    snprintf(str, sizeof(str), "%.1f", gpu->metrics.soc_power);
++    if (strlen(str) > 4)
++        right_aligned_text(text_color, HUDElements.ralign_width, "%.0f", gpu->metrics.soc_power);
++    else
++        right_aligned_text(text_color, HUDElements.ralign_width, "%.1f", gpu->metrics.soc_power);
++    ImGui::SameLine(0, 1.0f);
++    ImGui::PushFont(HUDElements.sw_stats->font_small);
++    HUDElements.TextColored(HUDElements.colors.text, "W");
++    ImGui::PopFont();
++}
++
++// Put the SoC element right after the later of gpu_stats and cpu_stats (the presets order them differently), only
++// where GPU power is shown (Steam overlay levels 2-4) and only when the GPU has a package counter.
++void HudElements::place_soc_element(const overlay_params* p){
++    ordered_functions.erase(std::remove_if(ordered_functions.begin(), ordered_functions.end(),
++                                           [](const Function& f) { return f.name == "soc_stats"; }),
++                            ordered_functions.end());
++    if (!p->enabled[OVERLAY_PARAM_ENABLED_gpu_stats] || !p->enabled[OVERLAY_PARAM_ENABLED_gpu_power] || !soc_power_gpu())
++        return;
++    int last = -1;
++    for (size_t i = 0; i < ordered_functions.size(); i++)
++        if (ordered_functions[i].name == "gpu_stats" || ordered_functions[i].name == "cpu_stats")
++            last = int(i);
++    if (last >= 0)
++        ordered_functions.insert(ordered_functions.begin() + last + 1, {soc_stats, "soc_stats", "NULL"});
++}
++
+ void HudElements::cpu_stats(){
+     if(HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_cpu_stats]){
+         ImguiNextColumnFirstItem();
+diff --git a/src/hud_elements.h b/src/hud_elements.h
+index 70deb51..67bf8ed 100644
+--- a/src/hud_elements.h
++++ b/src/hud_elements.h
+@@ -76,6 +76,8 @@ class HudElements{
+         static void time();
+         static void gpu_stats();
+         static void cpu_stats();
++        static void soc_stats();
++        void place_soc_element(const overlay_params* p);
+         static void core_load();
+         static void io_stats();
+         static void vram();
+diff --git a/src/overlay_params.cpp b/src/overlay_params.cpp
+index 45b49b9..a113371 100644
+--- a/src/overlay_params.cpp
++++ b/src/overlay_params.cpp
+@@ -1193,6 +1193,7 @@ parse_overlay_config(struct overlay_params *params,
+          HUDElements.sort_elements(option);
+       }
+    }
++   HUDElements.place_soc_element(params);
+ }
+ 
+ std::shared_ptr<overlay_params> get_params() {
 -- 
 2.55.0
 
