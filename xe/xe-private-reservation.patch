@@ -1,0 +1,12 @@
+--- a/drivers/gpu/drm/xe/xe_bo.c
++++ b/drivers/gpu/drm/xe/xe_bo.c
+@@ -1671,7 +1671,8 @@
+ 	 * This should never fail since there are no other references to the BO
+ 	 * any more.
+ 	 */
+-	WARN_ON(!dma_resv_trylock(ttm_bo->base.resv));
++	if (WARN_ON(!dma_resv_trylock(&ttm_bo->base._resv)))
++		return;
+ 
+ 	/*
+ 	 * Scrub the preempt fences if any. The unbind fence is already
