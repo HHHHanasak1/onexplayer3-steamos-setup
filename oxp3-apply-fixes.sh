@@ -104,7 +104,7 @@ TESTED_KERNEL_PREFIX="7.2.0-valve1"
 # ============================================================================
 set -euo pipefail
 
-MODE="apply"; FORCE=0; FORCE_NVME=0; ASSUME_YES=0; SKIP_WIFI=0; GYRO_REQ=""
+MODE="apply"; FORCE=0; FORCE_NVME=0; FORCE_PANEL=0; ASSUME_YES=0; SKIP_WIFI=0; GYRO_REQ=""
 for a in "$@"; do
     case "$a" in
         --check) MODE="--check" ;;
@@ -112,12 +112,13 @@ for a in "$@"; do
         --mcu-restore) MODE="--mcu-restore" ;;  # DANGEROUS: restore MCU button page 3 (Home/Xbox)
         --force) FORCE=1 ;;            # skip DMI + OS guards
         --force-nvme) FORCE_NVME=1 ;;  # apply nvme.noacpi=1 regardless of SSD model
+        --force-panel) FORCE_PANEL=1 ;;
         --yes|-y) ASSUME_YES=1 ;;      # no confirmation prompt
         --no-wifi) SKIP_WIFI=1 ;;      # skip step 0 (Wi-Fi firmware)
         --gyro) GYRO_REQ=1 ;;          # enable the experimental gyro step (remembered)
         --no-gyro) GYRO_REQ=0 ;;       # disable it and remove its files (remembered)
         -h|--help) sed -n '2,/^set -euo pipefail/p' "$0" | grep -E '^#' | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) echo "unknown option: $a  (valid: --check | --revert | --mcu-restore | --force | --force-nvme | --no-wifi | --gyro | --no-gyro | --yes)"; exit 2 ;;
+        *) echo "unknown option: $a  (valid: --check | --revert | --mcu-restore | --force | --force-nvme | --force-panel | --no-wifi | --gyro | --no-gyro | --yes)"; exit 2 ;;
     esac
 done
 # target user's home (real user when run via sudo)
@@ -142,6 +143,9 @@ BATT_SH="$USER_HOME/oxp3-fix/oxp3-battery-clamp.sh"          # in /home, survive
 BATT_UNIT=/etc/systemd/system/oxp3-battery-clamp.service
 TDP_SH="$USER_HOME/oxp3-fix/oxp3-tdp-sync.sh"                # in /home, survives updates
 TDP_UNIT=/etc/systemd/system/oxp3-tdp-sync.service
+PANEL_SH="$USER_HOME/oxp3-fix/oxp3-panel-fix.sh"
+PANEL_UNIT=/etc/systemd/system/oxp3-panel-fix.service
+PANEL_BIOS_MIN="5.11"
 RAPL_PY="$USER_HOME/oxp3-fix/oxp3-rapl-overlay.py"          # in /home, survives updates
 RAPL_UNIT=/etc/systemd/system/oxp3-rapl-overlay.service
 MANGO_BIN="$USER_HOME/oxp3-fix/mangoapp-oxp3"               # patched mangoapp (source: mangoapp/ in the repo)
@@ -730,6 +734,38 @@ EOT
 )
 TDP_UNIT_CONTENT="${TDP_UNIT_CONTENT//__TDP_SH__/$TDP_SH}"
 
+PANEL_SH_CONTENT=$(cat <<'EOT'
+#!/bin/bash
+for _ in $(seq 1 100); do
+    for d in /sys/kernel/debug/dri/*/; do
+        [ -e "${d}eDP-1/i915_edp_lobf_debug" ] && [ -e "${d}i915_edp_psr_debug" ] && break 2
+    done
+    d=""
+    sleep 0.2
+done
+[ -n "$d" ] || { echo "no xe debugfs entries for eDP-1, LOBF and PSR left unchanged"; exit 0; }
+echo 1 > "${d}eDP-1/i915_edp_lobf_debug" && echo 0x1 > "${d}i915_edp_psr_debug" && echo "LOBF and PSR/Panel Replay disabled on eDP-1 (${d%/})"
+EOT
+)
+
+PANEL_UNIT_CONTENT=$(cat <<'EOT'
+[Unit]
+Description=OXP3: turn off LOBF and PSR/Panel Replay on the OLED before the display session starts
+After=systemd-modules-load.service sys-kernel-debug.mount
+Before=display-manager.service sddm.service
+RequiresMountsFor=__PANEL_SH__
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash __PANEL_SH__
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOT
+)
+PANEL_UNIT_CONTENT="${PANEL_UNIT_CONTENT//__PANEL_SH__/$PANEL_SH}"
+
 # ---- CPU power for the overlay (step 10) ------------------------------
 RAPL_PY_CONTENT=$(cat <<'EOT'
 #!/usr/bin/python3
@@ -1234,7 +1270,7 @@ hdr()  { printf '\n== %s ==\n' "$*"; }
 same_content() { # same_content <file> <content>  -> 0 if identical
     [ -f "$1" ] && [ "$(cat "$1")" = "$2" ]
 }
-CHANGED=0; NEED_REBOOT=0; NEED_RELOGIN=0; VOLKEY_RESTART=0; IP_RESTART=0; BATT_RESTART=0; TDP_RESTART=0; RAPL_RESTART=0
+CHANGED=0; NEED_REBOOT=0; NEED_RELOGIN=0; VOLKEY_RESTART=0; IP_RESTART=0; BATT_RESTART=0; TDP_RESTART=0; RAPL_RESTART=0; PANEL_RESTART=0
 have_rapl_pkg() { [ -e /sys/class/powercap/intel-rapl:0/energy_uj ]; }
 # the running kernel loads the xe3lpd DMC (Panther Lake display); the line also names the loaded version
 dmc_loaded() { journalctl -k -b 0 --no-pager 2>/dev/null | sed -n "s|.*Finished loading DMC firmware $DMC_NAME (\(v[0-9.]*\)).*|\1|p" | tail -n1; }
@@ -1297,6 +1333,13 @@ paddles_ok() { [ -n "$OXP_DEV" ] && [ "$OXP_MODE" = xinput ] && paddle_key_ok "$
 # the 7.2.7+ driver with native OXP3 support registers these LEDs; its paddle defaults are F15/F16
 if ls -d /sys/class/leds/oxp:rgb:* >/dev/null 2>&1; then PADDLE_M1=KEY_F15; PADDLE_M2=KEY_F16; else PADDLE_M1=KEY_F16; PADDLE_M2=KEY_F17; fi
 NVME_MODEL="$(cat /sys/class/nvme/nvme0/model 2>/dev/null | xargs || echo unknown)"
+panel_is_oled() { grep -qa AMS881KB01 /sys/class/drm/card*-eDP-*/edid 2>/dev/null; }
+bios_at_least() { [ -n "$BIOS_VER" ] && [ "$(printf '%s\n' "$1" "$BIOS_VER" | sort -V | head -n1)" = "$1" ]; }
+panel_fix_needed() {
+    [ "$FORCE_PANEL" = 1 ] && return 0
+    panel_is_oled && bios_at_least "$PANEL_BIOS_MIN"
+}
+panel_debugfs() { sudo -n sh -c "cat /sys/kernel/debug/dri/*/$1" 2>/dev/null | sed -n "s/^$2: //p" | head -n1 || true; }
 
 # ---- experimental gyro: wanted? possible? ------------------------------
 IMU_ACTIVE=0; [ -e /sys/bus/i2c/devices/i2c-BMI0260:00 ] && IMU_ACTIVE=1     # the ACPI override is live in the running kernel
@@ -1380,6 +1423,14 @@ if have_rapl; then
     say "  package power limit PL1 : MMIO $(( $(cat /sys/class/powercap/intel-rapl-mmio:0/constraint_0_power_limit_uw) / 1000000 )) W, MSR $(( $(cat /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw) / 1000000 )) W   (the GPU obeys MSR; they should match)"
     if systemctl is-active -q oxp3-tdp-sync.service 2>/dev/null; then say "  TDP sync service oxp3-tdp-sync : active"; else say "  TDP sync service oxp3-tdp-sync : inactive/missing"; fi
 fi
+PANEL_PSR="$(panel_debugfs i915_edp_psr_status 'PSR mode')"; PANEL_PSR="${PANEL_PSR:-?}"
+PANEL_LOBF="$(panel_debugfs eDP-1/i915_edp_lobf_info 'LOBF status')"; PANEL_LOBF="${PANEL_LOBF:-?}"
+if panel_fix_needed; then
+    say "  OLED power saving (running) : PSR $PANEL_PSR, LOBF $PANEL_LOBF   expected disabled for both on BIOS $PANEL_BIOS_MIN and later ('?' = needs sudo to read)"
+    if systemctl is-active -q oxp3-panel-fix.service 2>/dev/null; then say "  panel fix service oxp3-panel-fix : active"; else say "  panel fix service oxp3-panel-fix : inactive/missing"; fi
+elif panel_is_oled; then
+    say "  OLED power saving (running) : PSR $PANEL_PSR, LOBF $PANEL_LOBF   driver default kept on BIOS ${BIOS_VER:-?} (the panel fix is for BIOS $PANEL_BIOS_MIN and later, --force-panel overrides)"
+fi
 if have_rapl_pkg; then
     if findmnt -n -T /sys/class/powercap/intel-rapl:0/energy_uj -o SOURCE 2>/dev/null | grep -q oxp3-rapl; then RAPL_STATE="coarse copy published (overlay can read it)"; else RAPL_STATE="root-only (overlay shows no CPU power)"; fi
     say "  CPU power for the overlay : $RAPL_STATE"
@@ -1460,6 +1511,14 @@ if [ "$MODE" = "--check" ]; then
         same_content "$TDP_SH" "$TDP_SH_CONTENT" || { say "  [diff] TDP sync script missing or differs"; ok=0; }
         same_content "$TDP_UNIT" "$TDP_UNIT_CONTENT" || { say "  [diff] TDP sync unit missing or differs"; ok=0; }
         systemctl is-enabled -q oxp3-tdp-sync.service 2>/dev/null || { say "  [diff] oxp3-tdp-sync.service not enabled"; ok=0; }
+    fi
+    if panel_fix_needed; then
+        same_content "$PANEL_SH" "$PANEL_SH_CONTENT" || { say "  [diff] panel fix script missing or differs"; ok=0; }
+        same_content "$PANEL_UNIT" "$PANEL_UNIT_CONTENT" || { say "  [diff] panel fix unit missing or differs"; ok=0; }
+        systemctl is-enabled -q oxp3-panel-fix.service 2>/dev/null || { say "  [diff] oxp3-panel-fix.service not enabled"; ok=0; }
+        if [ "$PANEL_PSR" != "?" ] && [ "$PANEL_LOBF" != "?" ] && { [ "$PANEL_PSR" != disabled ] || [ "$PANEL_LOBF" != disabled ]; }; then
+            say "  [diff] PSR or LOBF is still on for the panel (reboot after apply)"; ok=0
+        fi
     fi
     if have_rapl_pkg; then
         same_content "$RAPL_PY" "$RAPL_PY_CONTENT" || { say "  [diff] CPU power overlay script missing or differs"; ok=0; }
@@ -1565,6 +1624,8 @@ if [ "$MODE" = "--revert" ]; then
     if [ -f "$BATT_SH" ]; then rm -f "$BATT_SH"; say "  removed $BATT_SH"; fi
     if [ -f "$TDP_UNIT" ]; then sudo systemctl disable --now oxp3-tdp-sync.service 2>/dev/null || true; sudo rm -f "$TDP_UNIT"; sudo systemctl daemon-reload; say "  oxp3-tdp-sync.service stopped and removed (MSR PL1 back to the firmware value)"; fi
     if [ -f "$TDP_SH" ]; then rm -f "$TDP_SH"; say "  removed $TDP_SH"; fi
+    if [ -f "$PANEL_UNIT" ]; then sudo systemctl disable oxp3-panel-fix.service 2>/dev/null || true; sudo rm -f "$PANEL_UNIT"; sudo systemctl daemon-reload; say "  oxp3-panel-fix.service removed (the driver's PSR and LOBF return after the reboot)"; NEED_REBOOT=1; fi
+    if [ -f "$PANEL_SH" ]; then rm -f "$PANEL_SH"; say "  removed $PANEL_SH"; fi
     if [ -f "$RAPL_UNIT" ]; then sudo systemctl disable --now oxp3-rapl-overlay.service 2>/dev/null || true; sudo rm -f "$RAPL_UNIT"; sudo systemctl daemon-reload; say "  oxp3-rapl-overlay.service stopped and removed (CPU energy counter root-only again)"; fi
     if [ -f "$RAPL_PY" ]; then rm -f "$RAPL_PY"; say "  removed $RAPL_PY"; fi
     if [ -f "$MANGO_DROPIN" ]; then sudo rm -f "$MANGO_DROPIN"; sudo rmdir "$(dirname "$MANGO_DROPIN")" 2>/dev/null || true; user_systemctl daemon-reload; say "  removed $MANGO_DROPIN (stock mangoapp from the next overlay start)"; fi
@@ -1626,6 +1687,10 @@ say "  10) $RAPL_PY + $RAPL_UNIT (CPU/GPU energy for the performance overlay, co
 say "      + $MANGO_BIN + $MANGO_DROPIN (GPU power/temperature)   $(igpu_without_hwmon && echo "[integrated xe GPU]" || echo "[SKIPPED: the GPU has its own sensors]")"
 say "  11) $DMC_OVERRIDE (display firmware DMC v2.20, VRR)   $(dmc_applies || echo "[SKIPPED: this GPU does not use $DMC_NAME]")$(dmc_applies && { [ "$(dmc_system_sha)" = "$DMC_SHA256" ] && echo "[SteamOS ships v2.20, nothing to do]" || echo "[SteamOS ships a newer DMC]"; })"
 say "  12) $AUDIO_SH + $AUDIO_UNIT + $AUDIO_RESUME_UNIT (speakers after boot/resume when the headphone jack is empty)"
+if [ "$FORCE_PANEL" = 1 ]; then PANEL_NOTE="[forced: --force-panel]"
+elif panel_fix_needed; then PANEL_NOTE="[AMS881KB01 on BIOS $BIOS_VER]"
+else PANEL_NOTE="[SKIPPED: needs the AMS881KB01 panel on BIOS $PANEL_BIOS_MIN or later; use --force-panel]"; fi
+say "  13) $PANEL_SH + $PANEL_UNIT (OLED: LOBF and PSR/Panel Replay off at boot)   $PANEL_NOTE"
 if [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then read -r -p "  Continue? (y/N) " _ans; case "$_ans" in y|Y) ;; *) say "  cancelled."; exit 0 ;; esac; fi
 sudo -v
 
@@ -2139,6 +2204,33 @@ if ! systemctl is-enabled -q oxp3-audio-resume.service 2>/dev/null; then
 fi
 # check right away too, the current session may have started with the wrong profile
 [ "$AUDIO_CHANGED" = 1 ] && user_systemctl start --no-block oxp3-audio-route.service
+
+if ! panel_fix_needed; then
+    say "  [skip] the panel fix needs the AMS881KB01 panel on BIOS $PANEL_BIOS_MIN or later (BIOS ${BIOS_VER:-?}), keeping the driver's PSR and LOBF (force with --force-panel)"
+else
+mkdir -p "$(dirname "$PANEL_SH")"
+if same_content "$PANEL_SH" "$PANEL_SH_CONTENT"; then
+    say "  [skip] $PANEL_SH unchanged"
+else
+    printf '%s\n' "$PANEL_SH_CONTENT" > "$PANEL_SH"; chmod +x "$PANEL_SH"
+    say "  [write] $PANEL_SH"; CHANGED=1; PANEL_RESTART=1
+fi
+if same_content "$PANEL_UNIT" "$PANEL_UNIT_CONTENT"; then
+    say "  [skip] $PANEL_UNIT unchanged"
+else
+    printf '%s\n' "$PANEL_UNIT_CONTENT" | sudo tee "$PANEL_UNIT" >/dev/null
+    sudo systemctl daemon-reload
+    say "  [write] $PANEL_UNIT"; CHANGED=1; PANEL_RESTART=1
+fi
+if ! systemctl is-enabled -q oxp3-panel-fix.service 2>/dev/null; then
+    sudo systemctl enable oxp3-panel-fix.service >/dev/null 2>&1
+    say "  [enable] oxp3-panel-fix.service (runs at boot before gamescope)"; CHANGED=1
+fi
+if [ "$PANEL_RESTART" = 1 ] || ! systemctl is-active -q oxp3-panel-fix.service 2>/dev/null; then
+    say "  panel fix takes effect after the reboot"
+    NEED_REBOOT=1
+fi
+fi
 
 # f. summary
 hdr "Summary"
