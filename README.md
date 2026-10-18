@@ -39,6 +39,8 @@ This is the recovery-image method that works on this machine. You need a Windows
    sudo ./repair_device.sh all
    ```
 
+   **Installing to the second SSD (Mini SSD) instead.** `repair_device.sh` always installs to the disk named in its `DISK=` line near the top (`nvme0n1`) and erases it. To install to the other SSD, run `lsblk -o NAME,SIZE,MODEL` first and note the name of the target disk, then before `sudo ./repair_device.sh all` change that line, for example `sed -i 's|nvme0n1|nvme1n1|g' ./repair_device.sh`, and check it with `grep -n nvme ./repair_device.sh`. The disk numbering can differ between boots and machines, so go by size and model, not by the number. (Tip from issue #13.)
+
 8. The installation begins. After a moment the machine shows the OneXPlayer logo and appears to be completely frozen. This state lasts a long time. Do **not** touch or operate the machine. Wait until the USB drive's read/write indicator light turns off completely; this took about half an hour.
 9. Once the light is off, press Ctrl+Alt+F4 to return to the TTY and type `reboot`.
 10. You may see a massive amount of error logs flooding the screen. Do not panic, just press and hold the power button to force a shutdown.
