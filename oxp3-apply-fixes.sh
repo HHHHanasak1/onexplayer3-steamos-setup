@@ -96,6 +96,9 @@ TESTED_KERNEL_PREFIX="7.2.0-valve1"
 #        Headphones profile; a user unit re-selects the Speaker profile when the jack is empty (only on that mismatch)
 #    13) OLED stays on with BIOS 5.11 and later (contributed by kas5852, PR #15) - LOBF and PSR/Panel Replay off at boot
 #        through xe debugfs (oxp3-panel-fix.service); only for the AMS881KB01 panel on BIOS 5.11+, --force-panel overrides
+#    14) [optional, asked once in a normal run] SimpleDeckyTDP-Intel (kas5852, PR #24), a SimpleDeckyTDP fork with an
+#        Off / Smart / Full CPU boost; the zip comes with the release archive; replacing an installed SimpleDeckyTDP
+#        is only done after the user confirms it
 # Usage:
 #   ./oxp3-apply-fixes.sh                apply (asks sudo password, prints the plan and confirms)
 #   ./oxp3-apply-fixes.sh --check        check only, changes nothing, needs no sudo (covers every fix, gyro included when enabled)
@@ -105,6 +108,7 @@ TESTED_KERNEL_PREFIX="7.2.0-valve1"
 #                                        cannot be read back or verified. Normal users must NOT run this. No other option writes the MCU.
 #   flags: --yes no confirmation prompt | --force skip the device/OS guards | --force-nvme apply nvme.noacpi=1 on any SSD
 #          --no-wifi skip step 0 (Wi-Fi firmware) | --force-panel apply step 13 on any BIOS
+#          --sdtdp install SimpleDeckyTDP-Intel without asking (step 14) | --no-sdtdp remove it and stop asking
 #          --gyro enable the experimental gyro step (remembered; later runs and OS-update re-runs keep it)
 #          --no-gyro switch the gyro step off and remove its files (remembered)
 # Idempotent: safe to run repeatedly.
@@ -184,7 +188,7 @@ GRUB_IMU_FILE=/etc/default/grub.d/oxp3-imu.cfg
 GYRO_BIOS="5.09"                                             # the ACPI override is a patched copy of this BIOS's SSDT26
 GYRO_IP_SERIES="0.78"                                        # the patched build is InputPlumber 0.78.0
 GYRO_BIN_SHA256="1107d95c34863c7865cac64183673135098d77265a32763c22fc7efbc1893aa3"
-PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261018/oxp3-fix.tar.gz"
+PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261018-2/oxp3-fix.tar.gz"
 GYRO_PKG_URL="$PKG_URL"   # release archive holding the binary
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"                  # the extracted release archive, if the script came from it
 ACPI_IMG_SHA256="0e9b716e65978ac7365fda6fddf476a18b352a2d1ed98f4f30c8d3f8558b2113"
@@ -193,7 +197,7 @@ DECKY_PLUGINS="$USER_HOME/homebrew/plugins"
 SDTDP_PLUGIN="$DECKY_PLUGINS/SimpleDeckyTDP-Intel"
 SDTDP_UPSTREAM="$DECKY_PLUGINS/SimpleDeckyTDP"
 SDTDP_VERSION="1.0.7+oxp3.1"
-SDTDP_URL="https://github.com/kas5852/SimpleDeckyTDP-Intel/releases/download/v1.0.7%2Boxp3.1/simpledeckytdp-intel.zip"
+SDTDP_ZIP_NAME="simpledeckytdp-intel.zip"                   # in the release archive, from github.com/kas5852/SimpleDeckyTDP-Intel
 SDTDP_SHA256="1e0b955905ca0447a63503bc814f4cff2c60f43d9721f2f29cceb7368c15ecc5"
 SDTDP_README="https://github.com/kas5852/SimpleDeckyTDP-Intel#readme"
 SDTDP_ON_FILE="$GYRO_DIR/sdtdp.enabled"
@@ -1422,24 +1426,30 @@ remove_sdtdp() {
     say "  CPU frequency caps set by Smart boost stay until the next reboot. The original SimpleDeckyTDP is not put back; install it from the Decky store (https://github.com/aarron-lee/SimpleDeckyTDP)."
 }
 install_sdtdp() {
-    local _tmp
-    if ! command -v curl >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
-        say "  [error] SimpleDeckyTDP-Intel: curl and unzip are needed"; return 1
-    fi
-    if ! ip route 2>/dev/null | grep -q '^default'; then
-        say "  [error] SimpleDeckyTDP-Intel: no network to download it"; return 1
+    local _tmp _zip=""
+    if ! command -v unzip >/dev/null 2>&1; then
+        say "  [error] SimpleDeckyTDP-Intel: unzip is needed"; return 1
     fi
     _tmp="$(mktemp -d "${TMPDIR:-/tmp}/oxp3-sdtdp.XXXXXX")"
-    say "  [run] downloading SimpleDeckyTDP-Intel $SDTDP_VERSION ($SDTDP_URL) ..."
-    if ! curl -fL --retry 3 --progress-bar -o "$_tmp/sdtdp.zip" "$SDTDP_URL" \
-        || [ "$(sha256sum "$_tmp/sdtdp.zip" | cut -d' ' -f1)" != "$SDTDP_SHA256" ]; then
-        say "  [error] SimpleDeckyTDP-Intel: download failed or the sha256 does not match"; rm -rf "$_tmp"; return 1
+    if [ -f "$SCRIPT_DIR/$SDTDP_ZIP_NAME" ] && [ "$(sha256sum "$SCRIPT_DIR/$SDTDP_ZIP_NAME" | cut -d' ' -f1)" = "$SDTDP_SHA256" ]; then
+        _zip="$SCRIPT_DIR/$SDTDP_ZIP_NAME"; say "  SimpleDeckyTDP-Intel $SDTDP_VERSION from the release archive (sha256 verified)"
+    elif ! command -v curl >/dev/null 2>&1 || ! ip route 2>/dev/null | grep -q '^default'; then
+        say "  [error] SimpleDeckyTDP-Intel: the plugin is not on this machine and there is no network to download it"; rm -rf "$_tmp"; return 1
+    else
+        say "  [run] downloading the release archive ($PKG_URL) ..."
+        if curl -fL --retry 3 --progress-bar -o "$_tmp/pkg.tar.gz" "$PKG_URL" \
+            && tar -xzf "$_tmp/pkg.tar.gz" -C "$_tmp" "oxp3-fix/$SDTDP_ZIP_NAME" \
+            && [ "$(sha256sum "$_tmp/oxp3-fix/$SDTDP_ZIP_NAME" | cut -d' ' -f1)" = "$SDTDP_SHA256" ]; then
+            _zip="$_tmp/oxp3-fix/$SDTDP_ZIP_NAME"
+        else
+            say "  [error] SimpleDeckyTDP-Intel: download failed or the sha256 does not match"; rm -rf "$_tmp"; return 1
+        fi
     fi
-    if ! sudo unzip -oq "$_tmp/sdtdp.zip" -d "$DECKY_PLUGINS"; then
+    if ! sudo unzip -oq "$_zip" -d "$DECKY_PLUGINS"; then
         say "  [error] SimpleDeckyTDP-Intel: could not unpack it into $DECKY_PLUGINS"; rm -rf "$_tmp"; return 1
     fi
     rm -rf "$_tmp"; CHANGED=1
-    say "  [write] $SDTDP_PLUGIN (sha256 verified)"
+    say "  [write] $SDTDP_PLUGIN ($SDTDP_VERSION)"
     return 0
 }
 
@@ -1521,7 +1531,7 @@ say "  steamos-readonly : $RO_STATUS"
 if sdtdp_installed; then
     say "  SimpleDeckyTDP-Intel : $(sdtdp_version)$([ -d "$SDTDP_UPSTREAM" ] && echo ", the original SimpleDeckyTDP is installed too")"
 elif have_decky; then
-    say "  SimpleDeckyTDP-Intel : not installed (opt in with --sdtdp)"
+    say "  SimpleDeckyTDP-Intel : not installed (a normal run asks, or --sdtdp)"
 else
     say "  SimpleDeckyTDP-Intel : Decky Loader is not installed ($SDTDP_README)"
 fi
@@ -1604,7 +1614,7 @@ if [ "$MODE" = "--check" ]; then
     fi
     if [ "$SDTDP_WANT" = 1 ] && have_decky; then
         sdtdp_installed || { say "  [diff] SimpleDeckyTDP-Intel is opted in but not installed"; ok=0; }
-        [ -d "$SDTDP_UPSTREAM" ] && { say "  [diff] the original SimpleDeckyTDP is installed next to SimpleDeckyTDP-Intel (apply removes it)"; ok=0; }
+        [ -d "$SDTDP_UPSTREAM" ] && { say "  [diff] the original SimpleDeckyTDP is installed next to SimpleDeckyTDP-Intel; the two override each other (apply asks whether to replace it)"; ok=0; }
     fi
     same_content "$IP_YAML" "$IP_YAML_CONTENT" || { say "  [diff] IP yaml missing or differs"; ok=0; }
     same_content "$IP_CAPMAP" "$IP_CAPMAP_CONTENT" || { say "  [diff] IP capability map missing or differs"; ok=0; }
@@ -1726,17 +1736,39 @@ if [ "$GYRO_REQ" = "" ] && [ "$GYRO_ON" = 0 ] && [ "$GYRO_WANT" = 0 ] && [ -z "$
         *) GYRO_DECLINED=1 ;;
     esac
 fi
+SDTDP_ASKED=0
 if [ "$SDTDP_REQ" = "" ] && [ "$SDTDP_WANT" = 0 ] && ! sdtdp_installed && have_decky && [ ! -f "$SDTDP_OFF_FILE" ] && [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then
     say ""
-    say "  Optional: SimpleDeckyTDP-Intel, a Decky TDP plugin for this device (a fork of SimpleDeckyTDP). Its CPU Boost control"
-    say "  has Off / Smart / Full per game; Smart caps the CPU clocks so more of the TDP goes to the GPU, which smooths"
-    say "  stutter in CPU-heavy games at 30 W. It replaces an installed SimpleDeckyTDP and copies its profiles."
-    say "  Downloaded from GitHub with a pinned sha256. Undo any time with: $0 --no-sdtdp"
-    read -r -p "  Install SimpleDeckyTDP-Intel (Smart CPU boost)? (y/N) " _ans
+    say "  Optional (step 14): SimpleDeckyTDP-Intel, a TDP plugin for this device by kas5852 (a fork of SimpleDeckyTDP)."
+    say "  Its CPU Boost control has Off / Smart / Full per game; Smart caps the CPU clocks so more of the TDP goes to"
+    say "  the GPU, which smooths stutter in CPU-heavy games (RE4 at 30 W: 1% low fps +48 %)."
+    say "  It comes with this release (sha256 pinned); later updates come from the fork through the plugin's own updater."
+    if [ -d "$SDTDP_UPSTREAM" ]; then
+        say "  You have the original SimpleDeckyTDP installed. Installing SimpleDeckyTDP-Intel REPLACES it: the original"
+        say "  is removed (two TDP plugins would override each other). Your profiles are copied, and the original's"
+        say "  settings stay, so reinstalling it from the Decky store later brings them back."
+    fi
+    say "  Undo any time with: $0 --no-sdtdp"
+    read -r -p "  Install SimpleDeckyTDP-Intel$([ -d "$SDTDP_UPSTREAM" ] && echo " and replace SimpleDeckyTDP")? (y/N) " _ans
     case "$_ans" in
-        y|Y) SDTDP_REQ=1; SDTDP_WANT=1 ;;
+        y|Y) SDTDP_REQ=1; SDTDP_WANT=1; SDTDP_ASKED=1 ;;
         *) SDTDP_DECLINED=1 ;;
     esac
+fi
+# the original SimpleDeckyTDP is only removed with the user's consent: the answer above, --sdtdp, or a confirmation
+SDTDP_REPLACE=0
+if [ "$SDTDP_WANT" = 1 ] && [ "$SDTDP_REQ" != 0 ] && [ -d "$SDTDP_UPSTREAM" ] && have_decky; then
+    if [ "$SDTDP_ASKED" = 1 ]; then
+        SDTDP_REPLACE=1
+    elif [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then
+        say ""
+        say "  The original SimpleDeckyTDP is installed$(sdtdp_installed && echo " next to SimpleDeckyTDP-Intel; the two override each other"). Replacing it removes the"
+        say "  original (its settings stay, reinstalling it from the Decky store brings them back)."
+        read -r -p "  Replace SimpleDeckyTDP with SimpleDeckyTDP-Intel? (y/N) " _ans
+        case "$_ans" in y|Y) SDTDP_REPLACE=1 ;; esac
+    elif [ "$SDTDP_REQ" = 1 ]; then
+        SDTDP_REPLACE=1   # --sdtdp given explicitly in a non-interactive run
+    fi
 fi
 hdr "Applying fixes (will ask for sudo password)"
 say "  will check and write as needed:"
@@ -1776,9 +1808,9 @@ if [ "$SDTDP_REQ" = 0 ]; then
 elif [ "$SDTDP_WANT" = 1 ] && ! have_decky; then
     say "  14) SimpleDeckyTDP-Intel: [SKIPPED: Decky Loader is not installed, see $SDTDP_README]"
 elif [ "$SDTDP_WANT" = 1 ]; then
-    say "  14) SimpleDeckyTDP-Intel Decky plugin $(sdtdp_installed && echo "[$(sdtdp_version) installed]" || echo "[download $SDTDP_VERSION, sha256 pinned]")$([ -d "$SDTDP_UPSTREAM" ] && echo " and remove the original SimpleDeckyTDP")"
+    say "  14) SimpleDeckyTDP-Intel Decky plugin $(sdtdp_installed && echo "[$(sdtdp_version) installed]" || echo "[$SDTDP_VERSION from the release archive, sha256 pinned]")$([ -d "$SDTDP_UPSTREAM" ] && { [ "$SDTDP_REPLACE" = 1 ] && echo " and replace the original SimpleDeckyTDP" || echo " [original SimpleDeckyTDP kept]"; })"
 else
-    say "  14) SimpleDeckyTDP-Intel: not enabled (opt in with --sdtdp, see $SDTDP_README)"
+    say "  14) SimpleDeckyTDP-Intel: not installed (a normal run asks once, or --sdtdp; see $SDTDP_README)"
 fi
 if [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then read -r -p "  Continue? (y/N) " _ans; case "$_ans" in y|Y) ;; *) say "  cancelled."; exit 0 ;; esac; fi
 sudo -v
@@ -2330,15 +2362,21 @@ elif [ "$SDTDP_WANT" = 1 ] && ! have_decky; then
     say "  [skip] SimpleDeckyTDP-Intel: Decky Loader is not installed, see $SDTDP_README"
 elif [ "$SDTDP_WANT" = 1 ]; then
     SDTDP_RESTART=0
-    if sdtdp_installed; then
-        say "  [skip] SimpleDeckyTDP-Intel $(sdtdp_version) installed (it updates itself from System Info)"
+    if [ -d "$SDTDP_UPSTREAM" ] && [ "$SDTDP_REPLACE" != 1 ]; then
+        if sdtdp_installed; then
+            say "  [warn] SimpleDeckyTDP-Intel and the original SimpleDeckyTDP are both installed and override each other; remove one in Decky, or re-run this script and answer y"
+        else
+            say "  [skip] SimpleDeckyTDP-Intel: the original SimpleDeckyTDP stays (not replaced)"
+        fi
+    elif sdtdp_installed; then
+        say "  [skip] SimpleDeckyTDP-Intel $(sdtdp_version) installed (it updates itself from its System Info page)"
     elif install_sdtdp; then
         SDTDP_RESTART=1
     fi
     if sdtdp_installed; then
-        if [ -d "$SDTDP_UPSTREAM" ]; then
+        if [ -d "$SDTDP_UPSTREAM" ] && [ "$SDTDP_REPLACE" = 1 ]; then
             sudo rm -rf "$SDTDP_UPSTREAM"; CHANGED=1; SDTDP_RESTART=1
-            say "  [remove] $SDTDP_UPSTREAM (two TDP plugins would override each other; SimpleDeckyTDP-Intel copies its settings when it starts)"
+            say "  [remove] $SDTDP_UPSTREAM (replaced; SimpleDeckyTDP-Intel copies its settings when it starts, the original's settings file stays)"
         fi
         rm -f "$SDTDP_OFF_FILE"; : > "$SDTDP_ON_FILE"
     fi
