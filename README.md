@@ -132,6 +132,32 @@ The fix pack does not touch lighting.
 
 For a lighting UI use the [modified fork of HueSync](https://github.com/HHHHanasak1/HueSync/tree/oxp3), a Decky plugin with three independently controlled zones. On kernel 7.2.7 and later it drives the native LEDs above, on older kernels it falls back to writing the controller directly. Its README explains how to install it. It is independent of the fix pack, so the two can be installed in either order.
 
+### CPU boost (SimpleDeckyTDP-Intel)
+
+The fix pack does not install a TDP plugin.
+
+SimpleDeckyTDP's CPU Boost is an on/off switch, and on Panther Lake neither setting suits CPU-heavy games at a fixed TDP:
+
+- **Boost off:** every core stays at its base clock, so the game's main thread stalls.
+- **Boost on:** the E-cores and LP E-cores also clock up, to 3.6 and 3.1 GHz, and take a share of the power limit the GPU could use.
+
+[SimpleDeckyTDP-Intel](https://github.com/kas5852/SimpleDeckyTDP-Intel) is a fork of SimpleDeckyTDP whose CPU Boost control is **Off / Smart / Full**, saved per game like the rest of the profile. Smart turns boost on and caps the P-cores at 3.0 GHz, the E-cores at 2.0 GHz and the LP E-cores at 1.5 GHz. Off and Full behave like upstream.
+
+Resident Evil 4 (remake) at 30 W, same launch and scene, switching the slider:
+
+| Mode | Avg fps | 1% low fps |
+|---|---|---|
+| Off | 83.52 | 45.84 |
+| Smart | 93.69 | 68.73 |
+| Smart | 93.29 | 67.15 |
+
+That's +11.9 % average and +48.2 % 1% low. At another spot in the game (two runs each, the same caps set by a script) the gain was +5.5 % average and +47.5 % 1% low. GPU-bound games such as Final Fantasy VII Rebirth see no difference.
+
+- **Install:** follow the fork's README. Remove SimpleDeckyTDP first, because two TDP plugins keep overriding each other. On its first start the fork copies SimpleDeckyTDP's profiles and settings, and the original's settings file is left in place.
+- **Updates** come from the fork's releases, through the plugin's own update button on its System Info page. They are not reviewed in this repository.
+- **TDP sync (step 8):** the fork sets the TDP through the MMIO PL1, unchanged from SimpleDeckyTDP, and step 8 copies it into the MSR PL1 that the GPU obeys.
+- **Smart** only appears on Intel CPUs with P-, E- and LP E-cores, and needs "Enable Manual CPU Controls" in the plugin's advanced options. Its CPU caps stay until the next reboot after the plugin is removed.
+
 ### Known issues and limitations
 
 As of 2026-09-24 the stable fixes have been in daily use for about half a month, including across the 20260921.1000 SteamOS update (re-run the script after an update). Apart from the gyroscope below, no stability problems are known.
@@ -160,6 +186,7 @@ Suspend/resume failures were reproduced 7 out of 7 times with `rtcwake`-timed su
 
 Releases are named by date (`YYYYMMDD`) from 20261014 on; earlier ones used version numbers.
 
+- **Unreleased**: README section on SimpleDeckyTDP-Intel, a SimpleDeckyTDP fork with an Off / Smart / Full CPU boost control (not installed by the fix pack).
 - **20261018**: panel fix (step 13) for BIOS 5.11 and later. Panel Replay with selective update froze the OLED in game mode, PSR1 froze it later and with PSR off LOBF kept it black; a boot-time service turns LOBF and PSR/Panel Replay off before the display manager starts. `--force-panel` applies it on other BIOS versions. Content-driven HDR (PR #22): SDR games keep the panel in SDR and scan out directly, which gave RE4 about 7 % more fps; HDR games switch the panel to HDR as before. The overlay's CPU power is now the CPU cores only: it showed the whole package, which already includes the GPU listed below it. A new SoC item after the CPU and GPU (overlay levels 2 to 4) shows the whole-package power that the TDP limits. The empty VRAM item is gone (the integrated GPU uses the shared RAM).
 - **20261016**: speaker route check (step 12) for silent speakers after boot or resume. Display firmware DMC v2.20 (step 11) for SteamOS 20261015.1000, which ships v2.36 and with it the VRR cap from issue #1. GPU power and temperature in the overlay (step 10, patched mangoapp). CPU power in the performance overlay (step 10): a root service publishes a coarse copy of the package energy counter, replacing the opt-in udev rule from 20261015, which made the raw counter world-readable. The battery clamp and the new service detach their sysfs overlays lazily, because a reader holding the file open made the unmount fail and restarts stacked the mounts.
 - **20261015**: split-lock flood (step 9, contributed in PR #16). Steam's split locks were reported tens of times a second through steamos-manager, pushing everything else out of the journal and queueing hundreds of thousands of report files for steamos-log-submitter; `split_lock_detect=off` stops the traps, and apply clears the queued split-lock reports. Also: README notes on the CPU power reading in the performance overlay (PR #17) and on the gyro override with BIOS 5.12 (PR #18).
