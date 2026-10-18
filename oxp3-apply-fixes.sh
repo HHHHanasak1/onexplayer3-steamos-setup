@@ -89,6 +89,8 @@ TESTED_KERNEL_PREFIX="7.2.0-valve1"
 #        20261015.1000 on) cap the frame rate at 70-80 fps with VRR; v2.20 goes into /usr/lib/firmware/updates
 #    12) speakers silent after boot or resume - the jack detection briefly reports headphones and PipeWire keeps the
 #        Headphones profile; a user unit re-selects the Speaker profile when the jack is empty (only on that mismatch)
+#    13) OLED stays on with BIOS 5.11 and later (contributed by kas5852, PR #15) - LOBF and PSR/Panel Replay off at boot
+#        through xe debugfs (oxp3-panel-fix.service); only for the AMS881KB01 panel on BIOS 5.11+, --force-panel overrides
 # Usage:
 #   ./oxp3-apply-fixes.sh                apply (asks sudo password, prints the plan and confirms)
 #   ./oxp3-apply-fixes.sh --check        check only, changes nothing, needs no sudo (covers every fix, gyro included when enabled)
@@ -97,7 +99,7 @@ TESTED_KERNEL_PREFIX="7.2.0-valve1"
 #                                        Use ONLY if Home/Xbox are already dead. A wrong write can kill chassis keys for good and
 #                                        cannot be read back or verified. Normal users must NOT run this. No other option writes the MCU.
 #   flags: --yes no confirmation prompt | --force skip the device/OS guards | --force-nvme apply nvme.noacpi=1 on any SSD
-#          --no-wifi skip step 0 (Wi-Fi firmware)
+#          --no-wifi skip step 0 (Wi-Fi firmware) | --force-panel apply step 13 on any BIOS
 #          --gyro enable the experimental gyro step (remembered; later runs and OS-update re-runs keep it)
 #          --no-gyro switch the gyro step off and remove its files (remembered)
 # Idempotent: safe to run repeatedly.
