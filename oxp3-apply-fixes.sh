@@ -2376,7 +2376,7 @@ elif [ "$SDTDP_WANT" = 1 ]; then
     if sdtdp_installed; then
         if [ -d "$SDTDP_UPSTREAM" ] && [ "$SDTDP_REPLACE" = 1 ]; then
             sudo rm -rf "$SDTDP_UPSTREAM"; CHANGED=1; SDTDP_RESTART=1
-            say "  [remove] $SDTDP_UPSTREAM (replaced; SimpleDeckyTDP-Intel copies its settings when it starts, the original's settings file stays)"
+            say "  [remove] $SDTDP_UPSTREAM (replaced; its settings file stays, and SimpleDeckyTDP-Intel copies it on its first start if it has no settings of its own)"
         fi
         rm -f "$SDTDP_OFF_FILE"; : > "$SDTDP_ON_FILE"
     fi
