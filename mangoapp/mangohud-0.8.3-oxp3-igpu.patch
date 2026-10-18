@@ -197,20 +197,20 @@ index f46faba..18a52ba 100644
 2.55.0
 
 
-From 871651eea9dd9a7ef67f8a7998c9cc85b459bc39 Mon Sep 17 00:00:00 2001
+From 0242e8dca13d2930b46e6c10caf277a5913d2d35 Mon Sep 17 00:00:00 2001
 From: x <x@x>
 Date: Sun, 18 Oct 2026 10:26:05 +0900
 Subject: [PATCH 4/4] hud: SoC (package) power element after the CPU and GPU
- for integrated xe GPUs
+ for integrated xe GPUs, no empty VRAM item
 
 ---
- src/gpu_fdinfo.cpp     | 28 ++++++++++++++++++++++++
- src/gpu_fdinfo.h       |  9 ++++++++
+ src/gpu_fdinfo.cpp     | 28 +++++++++++++++++++++
+ src/gpu_fdinfo.h       |  9 +++++++
  src/gpu_metrics_util.h |  1 +
- src/hud_elements.cpp   | 48 ++++++++++++++++++++++++++++++++++++++++++
+ src/hud_elements.cpp   | 55 ++++++++++++++++++++++++++++++++++++++++++
  src/hud_elements.h     |  2 ++
  src/overlay_params.cpp |  1 +
- 6 files changed, 89 insertions(+)
+ 6 files changed, 96 insertions(+)
 
 diff --git a/src/gpu_fdinfo.cpp b/src/gpu_fdinfo.cpp
 index 90065c1..5fb85f1 100644
@@ -298,10 +298,10 @@ index b5c1075..214a7df 100644
      gpu_metrics()
          : load(0), temp(0), junction_temp(0), memory_temp(0),
 diff --git a/src/hud_elements.cpp b/src/hud_elements.cpp
-index 767f81b..6bca7dc 100644
+index 767f81b..b394c83 100644
 --- a/src/hud_elements.cpp
 +++ b/src/hud_elements.cpp
-@@ -418,6 +418,54 @@ void HudElements::gpu_stats(){
+@@ -418,6 +418,61 @@ void HudElements::gpu_stats(){
      }
  }
  
@@ -337,17 +337,24 @@ index 767f81b..6bca7dc 100644
 +    ImGui::PopFont();
 +}
 +
-+// Put the SoC element right after the later of gpu_stats and cpu_stats (the presets order them differently), only
-+// where GPU power is shown (Steam overlay levels 2-4) and only when the GPU has a package counter.
++// Put the SoC element right after the last of gpu_stats, cpu_stats and core_load (the presets order them differently;
++// level 4 lists every core after the CPU), only where GPU power is shown (Steam overlay levels 2-4) and only when the
++// GPU has a package counter. Such a GPU is integrated and has no VRAM of its own, so the empty VRAM item goes away.
 +void HudElements::place_soc_element(const overlay_params* p){
 +    ordered_functions.erase(std::remove_if(ordered_functions.begin(), ordered_functions.end(),
 +                                           [](const Function& f) { return f.name == "soc_stats"; }),
 +                            ordered_functions.end());
-+    if (!p->enabled[OVERLAY_PARAM_ENABLED_gpu_stats] || !p->enabled[OVERLAY_PARAM_ENABLED_gpu_power] || !soc_power_gpu())
++    if (!soc_power_gpu())
++        return;
++    ordered_functions.erase(std::remove_if(ordered_functions.begin(), ordered_functions.end(),
++                                           [](const Function& f) { return f.name == "vram"; }),
++                            ordered_functions.end());
++    if (!p->enabled[OVERLAY_PARAM_ENABLED_gpu_stats] || !p->enabled[OVERLAY_PARAM_ENABLED_gpu_power])
 +        return;
 +    int last = -1;
 +    for (size_t i = 0; i < ordered_functions.size(); i++)
-+        if (ordered_functions[i].name == "gpu_stats" || ordered_functions[i].name == "cpu_stats")
++        if (ordered_functions[i].name == "gpu_stats" || ordered_functions[i].name == "cpu_stats" ||
++            ordered_functions[i].name == "core_load")
 +            last = int(i);
 +    if (last >= 0)
 +        ordered_functions.insert(ordered_functions.begin() + last + 1, {soc_stats, "soc_stats", "NULL"});
