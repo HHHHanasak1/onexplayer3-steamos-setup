@@ -1,0 +1,26 @@
+From f5caf0d4375e12f2e4cb01d24911e40450af7c60 Mon Sep 17 00:00:00 2001
+From: perf <perf@localhost>
+Date: Sun, 18 Oct 2026 12:07:48 -0500
+Subject: [PATCH] vkd3d: treat anv as implicitly syncing host readback
+
+---
+ libs/vkd3d/command.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/libs/vkd3d/command.c b/libs/vkd3d/command.c
+index 8a632d2d..7f7687c9 100644
+--- a/libs/vkd3d/command.c
++++ b/libs/vkd3d/command.c
+@@ -111,7 +111,8 @@ static bool vkd3d_driver_implicitly_syncs_host_readback(VkDriverId driver_id)
+     return driver_id == VK_DRIVER_ID_MESA_RADV ||
+             driver_id == VK_DRIVER_ID_AMD_PROPRIETARY ||
+             driver_id == VK_DRIVER_ID_AMD_OPEN_SOURCE ||
+-            driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY;
++            driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY ||
++            driver_id == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA;
+ }
+ 
+ HRESULT vkd3d_queue_create(struct d3d12_device *device, uint32_t family_index, uint32_t queue_index,
+-- 
+2.54.0 (Apple Git-157)
+

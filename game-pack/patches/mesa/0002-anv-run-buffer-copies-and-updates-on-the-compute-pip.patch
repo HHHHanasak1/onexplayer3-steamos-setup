@@ -1,0 +1,155 @@
+From 6475a675e91c3d4304f513419e3fd1209fa2ff34 Mon Sep 17 00:00:00 2001
+From: perf <perf@localhost>
+Date: Sun, 18 Oct 2026 11:49:46 -0500
+Subject: [PATCH 2/2] anv: run buffer copies and updates on the compute
+ pipeline on Xe2+
+
+---
+ src/intel/vulkan/anv_blorp.c   | 29 ++++++++++++++++++++++++++---
+ src/intel/vulkan/anv_private.h | 21 ++++++++++++++-------
+ 2 files changed, 40 insertions(+), 10 deletions(-)
+
+diff --git a/src/intel/vulkan/anv_blorp.c b/src/intel/vulkan/anv_blorp.c
+index 836ab3c70c43..b88df17a771e 100644
+--- a/src/intel/vulkan/anv_blorp.c
++++ b/src/intel/vulkan/anv_blorp.c
+@@ -163,6 +163,7 @@ anv_device_finish_blorp(struct anv_device *device)
+ struct anv_blorp_batch_params {
+    enum blorp_batch_flags flags;
+    bool allow_3d_or_compute_variant;
++   bool prefer_compute;
+ };
+ 
+ static void
+@@ -190,6 +191,11 @@ anv_blorp_batch_init(struct anv_cmd_buffer *cmd_buffer,
+        anv_cmd_buffer_blorp_uses_compute(cmd_buffer))
+       flags |= BLORP_BATCH_USE_COMPUTE;
+ 
++   if (params->prefer_compute &&
++       cmd_buffer->device->info->ver >= 20 &&
++       anv_cmd_buffer_is_render_queue(cmd_buffer))
++      flags |= BLORP_BATCH_USE_COMPUTE;
++
+    /* Can't have both flags at the same time. */
+    assert((flags & BLORP_BATCH_USE_BLITTER) == 0 ||
+           (flags & BLORP_BATCH_USE_COMPUTE) == 0);
+@@ -988,6 +994,18 @@ anv_add_buffer_write_pending_bits(struct anv_cmd_buffer *cmd_buffer,
+       anv_cmd_buffer_shader_query_sync_bits(cmd_buffer);
+ }
+ 
++static void
++anv_add_blorp_buffer_write_pending_bits(struct anv_cmd_buffer *cmd_buffer,
++                                        const struct blorp_batch *batch)
++{
++   if (anv_cmd_buffer_is_blitter_queue(cmd_buffer))
++      return;
++
++   cmd_buffer->state.queries.buffer_write_bits |=
++      anv_cmd_buffer_shader_query_sync_bits_for(
++         cmd_buffer, (batch->flags & BLORP_BATCH_USE_COMPUTE) != 0);
++}
++
+ void anv_CmdCopyImageToMemoryKHR(
+     VkCommandBuffer                             commandBuffer,
+     const VkCopyDeviceMemoryImageInfoKHR*       pCopyMemoryInfo)
+@@ -1262,11 +1280,12 @@ anv_cmd_copy_addr(struct anv_cmd_buffer *cmd_buffer,
+                         &(struct anv_blorp_batch_params) {
+                            .flags = BLORP_BATCH_SRC_UNPADDED,
+                            .allow_3d_or_compute_variant = true,
++                           .prefer_compute = true,
+                         });
+ 
+    copy_memory(device, &batch, src_addr, dst_addr, size);
+ 
+-   anv_add_buffer_write_pending_bits(cmd_buffer, "after copy buffer");
++   anv_add_blorp_buffer_write_pending_bits(cmd_buffer, &batch);
+    anv_blorp_batch_finish(&batch);
+ }
+ 
+@@ -1281,6 +1300,7 @@ void anv_CmdCopyMemoryKHR(
+                         &(struct anv_blorp_batch_params) {
+                            .flags = BLORP_BATCH_SRC_UNPADDED,
+                            .allow_3d_or_compute_variant = true,
++                           .prefer_compute = true,
+                         });
+ 
+    for (unsigned r = 0; r < pCopyMemoryInfo->regionCount; r++) {
+@@ -1293,7 +1313,7 @@ void anv_CmdCopyMemoryKHR(
+                   region->srcRange.size);
+    }
+ 
+-   anv_add_buffer_write_pending_bits(cmd_buffer, "after copy buffer");
++   anv_add_blorp_buffer_write_pending_bits(cmd_buffer, &batch);
+ 
+    anv_blorp_batch_finish(&batch);
+ 
+@@ -1312,6 +1332,7 @@ anv_cmd_buffer_update_addr(
+                         &(struct anv_blorp_batch_params) {
+                            .flags = BLORP_BATCH_SRC_UNPADDED,
+                            .allow_3d_or_compute_variant = true,
++                           .prefer_compute = true,
+                         });
+ 
+    /* We can't quite grab a full block because the state stream needs a
+@@ -1327,6 +1348,8 @@ anv_cmd_buffer_update_addr(
+     */
+    anv_add_pending_pipe_bits(cmd_buffer,
+                              VK_PIPELINE_STAGE_2_HOST_BIT,
++                             (batch.flags & BLORP_BATCH_USE_COMPUTE) ?
++                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT :
+                              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                              ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT,
+                              "before UpdateBuffer");
+@@ -1368,7 +1391,7 @@ anv_cmd_buffer_update_addr(
+       pData = (void *)pData + copy_size;
+    }
+ 
+-   anv_add_buffer_write_pending_bits(cmd_buffer, "update buffer");
++   anv_add_blorp_buffer_write_pending_bits(cmd_buffer, &batch);
+ 
+    anv_blorp_batch_finish(&batch);
+ }
+diff --git a/src/intel/vulkan/anv_private.h b/src/intel/vulkan/anv_private.h
+index 1e109cfbe09c..b76b37654e92 100644
+--- a/src/intel/vulkan/anv_private.h
++++ b/src/intel/vulkan/anv_private.h
+@@ -5366,15 +5366,10 @@ anv_cmd_buffer_blorp_uses_compute(const struct anv_cmd_buffer *cmd_buffer)
+ }
+ 
+ static inline enum anv_pipe_bits
+-anv_cmd_buffer_shader_query_sync_bits(const struct anv_cmd_buffer *cmd_buffer)
++anv_cmd_buffer_shader_query_sync_bits_for(const struct anv_cmd_buffer *cmd_buffer,
++                                          bool op_uses_compute)
+ {
+    const struct anv_device *device = cmd_buffer->device;
+-   /* Xe2+ always uses the 3D pipeline for clearing
+-    *
+-    * Pre-Xe2, the clearing writes are in compute if we're in gpgpu mode on
+-    * the render engine or on the compute engine.
+-    */
+-   const bool op_uses_compute = anv_cmd_buffer_blorp_uses_compute(cmd_buffer);
+ 
+    enum anv_pipe_bits bits = ANV_PIPE_CS_STALL_BIT;
+    if (op_uses_compute) {
+@@ -5391,6 +5386,18 @@ anv_cmd_buffer_shader_query_sync_bits(const struct anv_cmd_buffer *cmd_buffer)
+    return bits;
+ }
+ 
++static inline enum anv_pipe_bits
++anv_cmd_buffer_shader_query_sync_bits(const struct anv_cmd_buffer *cmd_buffer)
++{
++   /* Xe2+ always uses the 3D pipeline for clearing
++    *
++    * Pre-Xe2, the clearing writes are in compute if we're in gpgpu mode on
++    * the render engine or on the compute engine.
++    */
++   return anv_cmd_buffer_shader_query_sync_bits_for(
++      cmd_buffer, anv_cmd_buffer_blorp_uses_compute(cmd_buffer));
++}
++
+ void
+ anv_cmd_buffer_bind_shaders(struct vk_command_buffer *cmd_buffer,
+                             uint32_t stage_count,
+-- 
+2.54.0 (Apple Git-157)
+

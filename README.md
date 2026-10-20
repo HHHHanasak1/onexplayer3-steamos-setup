@@ -117,6 +117,10 @@ Flags: `--yes`, `--force`, `--force-nvme`, `--force-panel`, `--no-wifi`, `--gyro
 - The volume key fix grabs the i8042 keyboard and forwards every key, including power, through a virtual device; keep that in mind with an external PS/2 keyboard.
 - Files go to `/etc`, `/home`, `/usr/lib/firmware` and `~/homebrew/plugins`. `--revert` removes them all except the Wi-Fi firmware.
 
+### Game pack (optional): Cyberpunk 2077, RE4, FF7 Rebirth
+
+A separate download, not part of the fix pack: patched Intel Vulkan driver builds plus measured per-game settings. At 30 W it took Final Fantasy VII Rebirth from 52.6 to 72.7 fps, Cyberpunk 2077's benchmark (Steam Deck preset) from 59.0 to 79.3 fps and Resident Evil 4 from 89.8 to 95.4 fps. It works on SteamOS with or without the fix pack and on other distributions with native Steam, installs into your home folder without sudo and `--revert` removes it. Install steps, numbers and sources: [game-pack/README.md](game-pack/README.md).
+
 ### Lighting
 
 The fix pack does not touch lighting. From kernel 7.2.7 (SteamOS 20261013.1000) hid-oxp drives the three light zones natively (`oxp:rgb:joystick_rings`, `oxp:rgb:guide_button`, `oxp:rgb:rear_logo`). For a UI use the [modified fork of HueSync](https://github.com/HHHHanasak1/HueSync/tree/oxp3), a Decky plugin with three independent zones.
@@ -142,6 +146,7 @@ SteamOS main 20261015.1000, kernel 7.2.7-valve2, OXP3 BIOS 5.09, panel SDC AMS88
 
 Releases are named by date (`YYYYMMDD`) from 20261014 on.
 
+- **Unreleased**: optional game pack (`game-pack/`, separate download): patched Mesa builds, vkd3d-proton hostsync DLLs and per-game settings for Cyberpunk 2077, Resident Evil 4 and Final Fantasy VII Rebirth.
 - **20261018-2**: optional SimpleDeckyTDP-Intel (step 14, contributed by kas5852 in PR #24) with an Off / Smart / Full CPU boost. A normal run asks once; the zip comes with the release archive; an installed SimpleDeckyTDP is replaced only after you confirm.
 - **20261018**: panel fix for BIOS 5.11 and later (step 13, PR #15). Content-driven HDR (PR #22). Overlay: CPU power is the cores only, new SoC total on levels 2-4, no empty VRAM item.
 - **20261016**: speaker route check (step 12), DMC v2.20 for the VRR cap (step 11), CPU and GPU power/temperature in the overlay (step 10).

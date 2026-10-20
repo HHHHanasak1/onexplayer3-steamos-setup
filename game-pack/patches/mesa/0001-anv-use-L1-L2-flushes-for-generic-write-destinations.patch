@@ -1,0 +1,29 @@
+From 3f3450bca823610a45b70ec6ee7b6673f54c6f18 Mon Sep 17 00:00:00 2001
+From: perf <perf@localhost>
+Date: Sun, 18 Oct 2026 11:48:18 -0500
+Subject: [PATCH 1/2] anv: use L1/L2 flushes for generic write destinations on
+ Xe2+
+
+---
+ src/intel/vulkan/genX_cmd_buffer.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/intel/vulkan/genX_cmd_buffer.c b/src/intel/vulkan/genX_cmd_buffer.c
+index 122f91332a52..58c2d95d15e5 100644
+--- a/src/intel/vulkan/genX_cmd_buffer.c
++++ b/src/intel/vulkan/genX_cmd_buffer.c
+@@ -4960,7 +4960,10 @@ anv_pipe_invalidate_bits_for_access_flags(struct anv_cmd_buffer *cmd_buffer,
+          /* Generic write, make sure all previously written things land in
+           * memory.
+           */
+-         pipe_bits |= ANV_PIPE_BARRIER_FLUSH_BITS;
++         if (device->info->ver < 20)
++            pipe_bits |= ANV_PIPE_BARRIER_FLUSH_BITS;
++         else
++            pipe_bits |= ANV_PIPE_L1_L2_BARRIER_FLUSH_BITS;
+          break;
+       case VK_ACCESS_2_CONDITIONAL_RENDERING_READ_BIT_EXT:
+       case VK_ACCESS_2_TRANSFORM_FEEDBACK_COUNTER_READ_BIT_EXT:
+-- 
+2.54.0 (Apple Git-157)
+
