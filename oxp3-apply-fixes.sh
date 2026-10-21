@@ -1342,7 +1342,15 @@ xe_gpu() { [ "$(basename "$(readlink /sys/class/drm/card0/device/driver 2>/dev/n
 xevma_kernel_ok() { [ "$KVER" = "$XEVMA_FOR" ]; }
 xevma_ko_ok() { [ -f "$XEVMA_KO" ] && [ "$(sha256sum "$XEVMA_KO" | cut -d' ' -f1)" = "$XEVMA_SHA256" ]; }
 xevma_loaded() { [ -d /sys/module/xevmafix ]; }
-xevma_handled() { cut -d' ' -f1 /sys/module/xevmafix/parameters/large_allocations 2>/dev/null || echo "?"; }
+xevma_handled() {
+    local n big
+    read -r n big < /sys/module/xevmafix/parameters/large_allocations 2>/dev/null || { echo "?"; return; }
+    if [ "${big:-0}" -gt $((4194304 / 384)) ]; then
+        echo "$n rebinds above 8 KB since boot, largest $big entries ($((big * 384 / 1048576)) MB, over the 4 MB kmalloc limit: would have failed without the fix)"
+    else
+        echo "$n rebinds above 8 KB since boot, largest ${big:-0} entries (under the 4 MB kmalloc limit, none would have failed)"
+    fi
+}
 user_systemctl() { systemctl --user "$@" 2>/dev/null || true; }   # the desktop user's manager (the script runs as that user)
 have_rapl() { [ -r /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw ] && [ -r /sys/class/powercap/intel-rapl-mmio:0/constraint_0_power_limit_uw ]; }
 
@@ -1550,7 +1558,7 @@ if igpu_without_hwmon; then
     say "  GPU power/temperature for the overlay : $MANGO_STATE"
 fi
 if xe_gpu; then
-    if xevma_loaded; then XEVMA_STATE="loaded, $(xevma_handled) oversized rebinds handled since boot"
+    if xevma_loaded; then XEVMA_STATE="loaded, $(xevma_handled)"
     elif xevma_kernel_ok; then XEVMA_STATE="not loaded (big games can crash with \"out of memory\" after sleep)"
     else XEVMA_STATE="not available for kernel $KVER (the module is built for $XEVMA_FOR)"; fi
     say "  games after sleep (xevmafix) : $XEVMA_STATE"

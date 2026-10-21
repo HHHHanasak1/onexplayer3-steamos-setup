@@ -19,6 +19,22 @@ It does that with two kprobes, on `xe_vma_ops_alloc` and `xe_vma_ops_fini`. Befo
 
 After the fix: zero ENOMEM across every sleep since, including real wakes with FF7R open. On one boot it handled 2,337 oversized rebinds, the biggest 30,753 entries (11.8 MB).
 
+## Reproducing without FF7R
+
+`vmatest.c` makes N small Vulkan allocations, submits once, then keeps submitting for a while. Run it with ANV's slab allocator off, otherwise ANV packs small allocations into shared buffers and you get far fewer mappings:
+
+```
+cc -O2 -o vmatest vmatest.c -ldl
+ANV_DEBUG=no-slab ./vmatest 20000 64 120 &
+sleep 10 && sudo rtcwake -m no -s 25 && sudo systemctl suspend
+```
+
+On my OXP3:
+- without the fix it prints `intel: the execbuf ioctl keeps returning ENOMEM` right after waking and the submits fail with -4 (device lost)
+- with the fix the submits keep working and `--check` shows `largest 20024 entries (7 MB, over the 4 MB kmalloc limit: would have failed without the fix)`
+
+Anything above about 10,900 mappings (4 MB / 384 bytes) hits it.
+
 ## Building
 
 The `.ko` only loads on the exact kernel it was built for. `build.sh` builds it on the device in an Arch container that uses the SteamOS package repositories and their `linux-neptune-72-headers`:
