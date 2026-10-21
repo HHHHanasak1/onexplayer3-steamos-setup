@@ -102,6 +102,9 @@ TESTED_KERNEL_PREFIX="7.2.0-valve1"
 #    14) [optional, asked once in a normal run] SimpleDeckyTDP-Intel (kas5852, PR #24), a SimpleDeckyTDP fork with an
 #        Off / Smart / Full CPU boost; the zip comes with the release archive; replacing an installed SimpleDeckyTDP
 #        is only done after the user confirms it
+#    15) games crash with "out of memory" after waking from sleep - on resume the xe driver rebinds every GPU mapping
+#        in one array that big games push past the 4 MB kmalloc limit. A small kernel module (xevmafix/ in the repo,
+#        oxp3-xevmafix.service) lets that array fall back to vmalloc. The .ko is built for one kernel and is skipped on any other
 # Usage:
 #   ./oxp3-apply-fixes.sh                apply (asks sudo password, prints the plan and confirms)
 #   ./oxp3-apply-fixes.sh --check        check only, changes nothing, needs no sudo (covers every fix, gyro included when enabled)
@@ -169,6 +172,10 @@ MANGO_LAUNCH="$USER_HOME/oxp3-fix/oxp3-mangoapp-launch.sh"   # starts MANGO_BIN,
 MANGO_DROPIN=/etc/systemd/user/gamescope-mangoapp.service.d/oxp3-mangoapp.conf
 MANGO_FOR="0.8.3.rc1.r24.g33c2c7dd"                         # the SteamOS mangohud package the patch was built from
 MANGO_SHA256="c79ca83722d0bc4dfb3f91388b2bbc012bfe8a30191df8c7996879a1a8d6645f"
+XEVMA_KO="$USER_HOME/oxp3-fix/xevmafix.ko"
+XEVMA_UNIT=/etc/systemd/system/oxp3-xevmafix.service
+XEVMA_FOR="7.2.7-valve2-1-neptune-72-g31504582a073"
+XEVMA_SHA256="b17d7bac071ded96da4f85fa6bf1bd52fa75bd0a10067fb33f7f8edd529a3599"
 DMC_NAME=i915/xe3lpd_dmc.bin                                 # the Panther Lake display controller firmware
 DMC_OVERRIDE=/usr/lib/firmware/updates/$DMC_NAME.zst         # firmware/updates takes precedence over the packaged file
 DMC_SHA256="150eaa60a776e489f69e6f334d4c12216c0d686f3a53ac2228d0a6ce48f8add9"   # v2.20 (.zst) from linux-firmware-neptune 20260910
@@ -691,6 +698,27 @@ EOT
 )
 VOLKEY_UNIT_CONTENT="${VOLKEY_UNIT_CONTENT//__VOLKEY_PY__/$VOLKEY_PY}"
 BATT_UNIT_CONTENT="${BATT_UNIT_CONTENT//__BATT_SH__/$BATT_SH}"
+
+XEVMA_UNIT_CONTENT=$(cat <<'EOT'
+[Unit]
+Description=OXP3 games survive waking from sleep (xe rebind array via kvmalloc)
+After=systemd-modules-load.service
+RequiresMountsFor=__XEVMA_KO__
+ConditionKernelVersion=__XEVMA_FOR__
+ConditionPathExists=__XEVMA_KO__
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/usr/bin/modprobe xe
+ExecStart=/bin/sh -c '[ -d /sys/module/xevmafix ] || exec /usr/bin/insmod __XEVMA_KO__'
+
+[Install]
+WantedBy=multi-user.target
+EOT
+)
+XEVMA_UNIT_CONTENT="${XEVMA_UNIT_CONTENT//__XEVMA_KO__/$XEVMA_KO}"
+XEVMA_UNIT_CONTENT="${XEVMA_UNIT_CONTENT//__XEVMA_FOR__/$XEVMA_FOR}"
 
 # ---- TDP: MSR package PL1 follows the MMIO package PL1 (step 8) --------------------
 TDP_SH_CONTENT=$(cat <<'EOT'
@@ -1310,6 +1338,19 @@ DMC_RUNNING="$(dmc_loaded)"
 igpu_without_hwmon() { [ "$(basename "$(readlink /sys/class/drm/card0/device/driver 2>/dev/null)")" = xe ] && ! ls -d /sys/class/drm/card0/device/hwmon >/dev/null 2>&1; }
 mango_bin_ok() { [ -f "$MANGO_BIN" ] && [ "$(sha256sum "$MANGO_BIN" | cut -d' ' -f1)" = "$MANGO_SHA256" ]; }
 mango_matches() { pacman -Q mangohud 2>/dev/null | grep -q "^mangohud $MANGO_FOR-"; }
+xe_gpu() { [ "$(basename "$(readlink /sys/class/drm/card0/device/driver 2>/dev/null)")" = xe ]; }
+xevma_kernel_ok() { [ "$KVER" = "$XEVMA_FOR" ]; }
+xevma_ko_ok() { [ -f "$XEVMA_KO" ] && [ "$(sha256sum "$XEVMA_KO" | cut -d' ' -f1)" = "$XEVMA_SHA256" ]; }
+xevma_loaded() { [ -d /sys/module/xevmafix ]; }
+xevma_handled() {
+    local n big
+    read -r n big < /sys/module/xevmafix/parameters/large_allocations 2>/dev/null || { echo "?"; return; }
+    if [ "${big:-0}" -gt $((4194304 / 384)) ]; then
+        echo "$n rebinds above 8 KB since boot, largest $big entries ($((big * 384 / 1048576)) MB, over the 4 MB kmalloc limit: would have failed without the fix)"
+    else
+        echo "$n rebinds above 8 KB since boot, largest ${big:-0} entries (under the 4 MB kmalloc limit, none would have failed)"
+    fi
+}
 user_systemctl() { systemctl --user "$@" 2>/dev/null || true; }   # the desktop user's manager (the script runs as that user)
 have_rapl() { [ -r /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw ] && [ -r /sys/class/powercap/intel-rapl-mmio:0/constraint_0_power_limit_uw ]; }
 
@@ -1516,6 +1557,12 @@ if igpu_without_hwmon; then
     if [ -f "$MANGO_DROPIN" ] && mango_bin_ok; then MANGO_STATE="patched mangoapp installed$(mango_matches || echo ", but SteamOS has another mangohud version: the stock overlay runs")"; else MANGO_STATE="stock mangoapp (no GPU power/temperature)"; fi
     say "  GPU power/temperature for the overlay : $MANGO_STATE"
 fi
+if xe_gpu; then
+    if xevma_loaded; then XEVMA_STATE="loaded, $(xevma_handled)"
+    elif xevma_kernel_ok; then XEVMA_STATE="not loaded (big games can crash with \"out of memory\" after sleep)"
+    else XEVMA_STATE="not available for kernel $KVER (the module is built for $XEVMA_FOR)"; fi
+    say "  games after sleep (xevmafix) : $XEVMA_STATE"
+fi
 if [ "$GYRO_ON" = 1 ]; then
     say "  gyro (experimental) : enabled ; IMU $([ "$IMU_ACTIVE" = 1 ] && echo "visible to the kernel (ACPI override active)" || echo "NOT visible yet (ACPI override not loaded: reboot needed)") ; patched InputPlumber $(gyro_bin_ok && echo present || echo missing)"
 elif [ "$GYRO_WANT" = 1 ]; then
@@ -1615,6 +1662,14 @@ if [ "$MODE" = "--check" ]; then
         if [ "$(dmc_system_sha)" != "$DMC_SHA256" ] && ! dmc_override_ok; then say "  [diff] SteamOS ships a newer DMC and the v2.20 override is missing"; ok=0; fi
         if [ -n "$DMC_RUNNING" ] && [ "$DMC_RUNNING" != v2.20 ]; then say "  [diff] the running kernel loaded DMC $DMC_RUNNING (reboot after apply)"; ok=0; fi
     fi
+    if xe_gpu && xevma_kernel_ok; then
+        xevma_ko_ok || { say "  [diff] xevmafix.ko missing or differs (apply takes it from the release archive)"; ok=0; }
+        same_content "$XEVMA_UNIT" "$XEVMA_UNIT_CONTENT" || { say "  [diff] xevmafix unit missing or differs"; ok=0; }
+        systemctl is-enabled -q oxp3-xevmafix.service 2>/dev/null || { say "  [diff] oxp3-xevmafix.service not enabled"; ok=0; }
+        xevma_loaded || { say "  [diff] xevmafix is not loaded"; ok=0; }
+    elif xe_gpu; then
+        say "  [info] xevmafix is built for kernel $XEVMA_FOR and this is $KVER: big games can crash after sleep until a rebuilt module ships"
+    fi
     if [ "$SDTDP_WANT" = 1 ] && have_decky; then
         sdtdp_installed || { say "  [diff] SimpleDeckyTDP-Intel is opted in but not installed"; ok=0; }
         [ -d "$SDTDP_UPSTREAM" ] && { say "  [diff] the original SimpleDeckyTDP is installed next to SimpleDeckyTDP-Intel; the two override each other (apply asks whether to replace it)"; ok=0; }
@@ -1707,6 +1762,8 @@ if [ "$MODE" = "--revert" ]; then
     if [ -f "$TDP_SH" ]; then rm -f "$TDP_SH"; say "  removed $TDP_SH"; fi
     if [ -f "$PANEL_UNIT" ]; then sudo systemctl disable oxp3-panel-fix.service 2>/dev/null || true; sudo rm -f "$PANEL_UNIT"; sudo systemctl daemon-reload; say "  oxp3-panel-fix.service removed (the driver's PSR and LOBF return after the reboot)"; NEED_REBOOT=1; fi
     if [ -f "$PANEL_SH" ]; then rm -f "$PANEL_SH"; say "  removed $PANEL_SH"; fi
+    if [ -f "$XEVMA_UNIT" ]; then sudo systemctl disable oxp3-xevmafix.service 2>/dev/null || true; sudo rm -f "$XEVMA_UNIT"; sudo systemctl daemon-reload; say "  oxp3-xevmafix.service removed (the module stays loaded until the reboot)"; xevma_loaded && NEED_REBOOT=1; fi
+    if [ -f "$XEVMA_KO" ]; then rm -f "$XEVMA_KO"; say "  removed $XEVMA_KO"; fi
     if [ -f "$RAPL_UNIT" ]; then sudo systemctl disable --now oxp3-rapl-overlay.service 2>/dev/null || true; sudo rm -f "$RAPL_UNIT"; sudo systemctl daemon-reload; say "  oxp3-rapl-overlay.service stopped and removed (CPU energy counter root-only again)"; fi
     if [ -f "$RAPL_PY" ]; then rm -f "$RAPL_PY"; say "  removed $RAPL_PY"; fi
     if [ -f "$MANGO_DROPIN" ]; then sudo rm -f "$MANGO_DROPIN"; sudo rmdir "$(dirname "$MANGO_DROPIN")" 2>/dev/null || true; user_systemctl daemon-reload; say "  removed $MANGO_DROPIN (stock mangoapp from the next overlay start)"; fi
@@ -1806,6 +1863,10 @@ if [ "$FORCE_PANEL" = 1 ]; then PANEL_NOTE="[forced: --force-panel]"
 elif panel_fix_needed; then PANEL_NOTE="[AMS881KB01 on BIOS $BIOS_VER]"
 else PANEL_NOTE="[SKIPPED: needs the AMS881KB01 panel on BIOS $PANEL_BIOS_MIN or later; use --force-panel]"; fi
 say "  13) $PANEL_SH + $PANEL_UNIT (OLED: LOBF and PSR/Panel Replay off at boot)   $PANEL_NOTE"
+if ! xe_gpu; then XEVMA_NOTE="[SKIPPED: not an xe GPU]"
+elif ! xevma_kernel_ok; then XEVMA_NOTE="[SKIPPED: built for kernel $XEVMA_FOR, this is $KVER]"
+elif xevma_loaded; then XEVMA_NOTE="[loaded]"
+else XEVMA_NOTE="[from the release archive, sha256 pinned, loads right away]"; fi
 if [ "$SDTDP_REQ" = 0 ]; then
     say "  14) SimpleDeckyTDP-Intel: REMOVE $SDTDP_PLUGIN (--no-sdtdp)"
 elif [ "$SDTDP_WANT" = 1 ] && ! have_decky; then
@@ -1815,6 +1876,7 @@ elif [ "$SDTDP_WANT" = 1 ]; then
 else
     say "  14) SimpleDeckyTDP-Intel: not installed (a normal run asks once, or --sdtdp; see $SDTDP_README)"
 fi
+say "  15) $XEVMA_KO + $XEVMA_UNIT (games survive waking from sleep)   $XEVMA_NOTE"
 if [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then read -r -p "  Continue? (y/N) " _ans; case "$_ans" in y|Y) ;; *) say "  cancelled."; exit 0 ;; esac; fi
 sudo -v
 
@@ -2386,6 +2448,42 @@ elif [ "$SDTDP_WANT" = 1 ]; then
     if [ "$SDTDP_RESTART" = 1 ]; then sudo systemctl restart plugin_loader.service; say "  [restart] plugin_loader (Decky)"; fi
 elif [ "$SDTDP_DECLINED" = 1 ]; then
     : > "$SDTDP_OFF_FILE"
+fi
+
+if ! xe_gpu; then
+    say "  [skip] xevmafix: not an xe GPU"
+elif ! xevma_kernel_ok; then
+    say "  [skip] xevmafix is built for kernel $XEVMA_FOR and this is $KVER (big games can crash after sleep until a rebuilt module ships)"
+else
+    XEVMA_OK=1
+    if xevma_ko_ok; then
+        say "  [skip] $XEVMA_KO unchanged"
+    elif [ "$SCRIPT_DIR/xevmafix.ko" != "$XEVMA_KO" ] && [ -f "$SCRIPT_DIR/xevmafix.ko" ] && [ "$(sha256sum "$SCRIPT_DIR/xevmafix.ko" | cut -d' ' -f1)" = "$XEVMA_SHA256" ]; then
+        mkdir -p "$(dirname "$XEVMA_KO")"; install -m 644 "$SCRIPT_DIR/xevmafix.ko" "$XEVMA_KO"
+        say "  [write] $XEVMA_KO (from the release archive, sha256 verified)"; CHANGED=1
+    else
+        say "  [skip] xevmafix.ko is not next to this script or its sha256 differs (it comes with the release archive)"; XEVMA_OK=0
+    fi
+    if [ "$XEVMA_OK" = 1 ]; then
+        if same_content "$XEVMA_UNIT" "$XEVMA_UNIT_CONTENT"; then
+            say "  [skip] $XEVMA_UNIT unchanged"
+        else
+            printf '%s\n' "$XEVMA_UNIT_CONTENT" | sudo tee "$XEVMA_UNIT" >/dev/null
+            sudo systemctl daemon-reload
+            say "  [write] $XEVMA_UNIT"; CHANGED=1
+        fi
+        if ! systemctl is-enabled -q oxp3-xevmafix.service 2>/dev/null; then
+            sudo systemctl enable oxp3-xevmafix.service >/dev/null 2>&1
+            say "  [enable] oxp3-xevmafix.service (loads the module at boot)"; CHANGED=1
+        fi
+        if ! xevma_loaded; then
+            if sudo systemctl restart oxp3-xevmafix.service && xevma_loaded; then
+                say "  [load] xevmafix (active now, no reboot needed)"; CHANGED=1
+            else
+                say "  [warn] xevmafix did not load, see: journalctl -k -b 0 | grep xevmafix"
+            fi
+        fi
+    fi
 fi
 
 # f. summary
