@@ -11,6 +11,9 @@
 #         right after waking from sleep, because xe rebinds every GPU mapping in one kmalloc array that goes past 4 MB.
 #         A small kernel module (release archive, sha256 pinned, kernel 7.2.7-valve2 only) lets that array come from
 #         vmalloc. It loads right away and at boot; on any other kernel the step skips itself.
+#         Step 10: on some boots intel_rapl_msr skips the GPU (PP1) zone because its counter still reads 0, and the
+#         overlay lost GPU power and the SoC total. The service now waits for the counter, reloads intel_rapl_msr once
+#         and restarts mangoapp.
 # 20261018-2: new optional step 14, SimpleDeckyTDP-Intel (contributed by kas5852, PR #24): a SimpleDeckyTDP fork whose
 #         CPU Boost is Off / Smart / Full per game. A normal run asks once; the zip comes with the release archive; an
 #         installed SimpleDeckyTDP is replaced only after the user confirms.
@@ -841,8 +844,13 @@ RAPL_PY_CONTENT=$(cat <<'EOT'
 #   intel-rapl:0:0  core       RAPL PP0, the CPU cores (read by the patched mangoapp as CPU power)
 #   intel-rapl:0:1  uncore     RAPL PP1, the graphics power plane (read by the patched mangoapp for the integrated GPU)
 # Every other RAPL counter stays root-only. The copies are monotonic counters that never wrap.
+# On some boots the kernel has no PP1 zone: intel_rapl_msr skips a domain whose energy counter still reads 0 when it
+# loads, and intel-rapl:0:1 is then "dram". The service then waits until the GPU's counter (MSR 0x641) runs, reloads
+# intel_rapl_msr once so the zone appears, starts over and restarts mangoapp in the user sessions to pick it up.
 # Run as a root service (see the fix pack). --stop removes the overlays (systemctl stop does it too).
 import os
+import pwd
+import struct
 import subprocess
 import sys
 import time
@@ -920,6 +928,57 @@ for z in zones:
     z["last"] = read_real(z)
 print(f"overlay active for {', '.join(z['path'] for z in zones)}: world-readable copies, {PERIOD} s / {QUANTUM // 1000} mJ")
 sys.stdout.flush()
+
+PP1 = real_path("intel-rapl:0:1")
+RELOADED = len(sys.argv) > 1 and sys.argv[1] == "--reloaded"
+need_pp1 = not RELOADED and not any(z["path"] == PP1 for z in zones)
+
+
+def pp1_counter() -> int:
+    # MSR_PP1_ENERGY_STATUS, the counter intel_rapl_msr found at 0 when it skipped the zone
+    fd = os.open("/dev/cpu/0/msr", os.O_RDONLY)
+    try:
+        return struct.unpack("<Q", os.pread(fd, 8, 0x641))[0] & 0xFFFFFFFF
+    finally:
+        os.close(fd)
+
+
+def restart_mangoapp() -> None:
+    # mangoapp looks for the counters only when it starts
+    for uid in os.listdir("/run/user"):
+        try:
+            name = pwd.getpwuid(int(uid)).pw_name
+        except (KeyError, ValueError):
+            continue
+        subprocess.run(["systemctl", "--user", "-M", f"{name}@", "try-restart", "gamescope-mangoapp.service"],
+                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def reload_rapl_msr() -> None:
+    print("no PP1 (uncore) zone and the GPU energy counter runs now: reloading intel_rapl_msr")
+    sys.stdout.flush()
+    for z in zones:
+        unmount(z["path"])
+        os.close(z["real"])
+    subprocess.run(["modprobe", "-r", "intel_rapl_msr"], check=False)
+    subprocess.run(["modprobe", "intel_rapl_msr"], check=False)
+    for _ in range(50):
+        if os.path.exists(real_path("intel-rapl:0")):
+            break
+        time.sleep(0.1)
+    os.execv(sys.executable, [sys.executable, os.path.abspath(__file__), "--reloaded"])   # fds are not inherited
+
+
+if RELOADED:
+    if any(z["path"] == PP1 for z in zones):
+        print("PP1 (uncore) zone back after the reload, restarting mangoapp")
+        sys.stdout.flush()
+        restart_mangoapp()
+    else:
+        print("still no PP1 (uncore) zone after the reload: the overlay shows no GPU power on this boot")
+        sys.stdout.flush()
+
+ticks = 0
 while True:
     time.sleep(PERIOD)
     for z in zones:
@@ -927,6 +986,13 @@ while True:
         z["total"] += now - z["last"] if now >= z["last"] else now + z["wrap"] - z["last"]
         z["last"] = now
         publish(z)
+    ticks += 1
+    if need_pp1 and ticks % 4 == 0:
+        try:
+            if pp1_counter():
+                reload_rapl_msr()
+        except OSError:
+            need_pp1 = False                # no msr device: keep running without PP1
 EOT
 )
 

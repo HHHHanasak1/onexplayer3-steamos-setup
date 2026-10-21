@@ -144,7 +144,7 @@ SteamOS main 20261015.1000, kernel 7.2.7-valve2, OXP3 BIOS 5.09, panel SDC AMS88
 
 Releases are named by date (`YYYYMMDD`) from 20261014 on.
 
-- **20261021**: big games no longer crash with "out of memory" after waking from sleep (step 15, xevmafix, contributed by kas5852 in PR #26).
+- **20261021**: big games no longer crash with "out of memory" after waking from sleep (step 15, xevmafix, contributed by kas5852 in PR #26). Overlay: when the kernel skips the GPU energy zone at boot, step 10 now brings it back, so GPU power and the SoC total no longer go missing.
 - **20261018-2**: optional SimpleDeckyTDP-Intel (step 14, contributed by kas5852 in PR #24) with an Off / Smart / Full CPU boost. A normal run asks once; the zip comes with the release archive; an installed SimpleDeckyTDP is replaced only after you confirm.
 - **20261018**: panel fix for BIOS 5.11 and later (step 13, PR #15). Content-driven HDR (PR #22). Overlay: CPU power is the cores only, new SoC total on levels 2-4, no empty VRAM item.
 - **20261016**: speaker route check (step 12), DMC v2.20 for the VRR cap (step 11), CPU and GPU power/temperature in the overlay (step 10).
