@@ -3,7 +3,7 @@
 This repository covers everything needed to run SteamOS on the ONEXPLAYER 3:
 
 1. **Part 1** is a step-by-step guide to installing SteamOS with the recovery image.
-2. **Part 2** is a fix pack, one script that repairs what does not work out of the box: suspend/resume, the OLED panel (black screen, HDR, refresh rates, VRR), volume keys, the chassis keys and back paddles, the speakers after boot, the battery percentage, the GPU power limit, the readings in the performance overlay and a split-lock report flood. Optional: the gyroscope (experimental) and a TDP plugin with a CPU boost mode for this chip.
+2. **Part 2** is a fix pack, one script that repairs what does not work out of the box: suspend/resume, the OLED panel (black screen, HDR, refresh rates, VRR), volume keys, the chassis keys and back paddles (also on the controller connector dock), the speakers after boot, the battery percentage, the GPU power limit, the readings in the performance overlay, a split-lock report flood and big games crashing after sleep. Optional: the gyroscope (experimental) and a TDP plugin with a CPU boost mode for this chip.
 
 ## Part 1 - Installing SteamOS
 
@@ -68,13 +68,14 @@ This is the recovery-image method that works on this machine. You need a Windows
 |---|---|---|
 | **No Wi-Fi / no Bluetooth** (Intel BE201, only SteamOS before 20261015.1000) | SteamOS' `linux-firmware-neptune` lacked the BE201 firmware files | Step 0 extracts only the missing files from the repo's `linux-firmware-intel` (cached in `~/.cache/oxp3-fix`, so later runs work offline). Newer SteamOS ships them, and the step skips itself |
 | **Game-mode suspend/resume freeze** | The Predator GM7 NVMe (`1dee:1602`) does not come back from s2idle through the ACPI StorageD3 path (`Disabling device after reset failure: -19`) | Kernel parameter `nvme.noacpi=1`, only when that SSD is present. Deep S0ix is still reached |
-| **Big games crash with "out of memory" right after waking from sleep** (FF7 Rebirth, about 2 s after resume, with 11-16 GB free) | On suspend xe moves every GPU buffer out. On resume it rebinds every mapping in one array of 384 bytes per mapping. FF7R has about 33,500 mappings which means 12.9 MB. That's over the 4 MB kmalloc limit which means it fails every time (63 of 63 in a trace) and Mesa reports `execbuf ioctl keeps returning ENOMEM` | `oxp3-xevmafix.service` loads a small module ([`xevmafix/`](xevmafix/README.md)) that lets that one array come from vmalloc, the same change Intel already made in drm-xe-next. Takes effect right away. Built for one kernel only and skipped on any other |
+| **Big games crash with "out of memory" right after waking from sleep** (FF7 Rebirth, about 2 s after resume, with 11-16 GB free) | On suspend xe moves every GPU buffer out. On resume it rebinds every mapping in one array of 384 bytes per mapping. FF7R has about 33,500 mappings which means 12.9 MB. That's over the 4 MB kmalloc limit which means it fails every time (63 of 63 in a trace) and Mesa reports `execbuf ioctl keeps returning ENOMEM` | `oxp3-xevmafix.service` loads a small module ([`xevmafix/`](xevmafix/README.md)) that lets that one array come from vmalloc, the same change Intel already made in drm-xe-next. Built for one kernel only and skipped on any other |
 | **Panel stays black in game mode**, brightness slider does nothing | gamescope drives the OLED (Samsung AMS881KB01-0) in BT.2020/PQ, but xe never enables the panel's HDR backlight channel | A gamescope lua keeps the panel in its native gamma-2.2 mode and lets gamescope tone-map, like the Steam Deck OLED. It also registers the real 30-144 Hz VRR range, and with `content_driven = true` SDR games keep the panel in SDR and scan out directly (RE4 at 30 W: 87 → 93 fps); the panel switches to HDR only while an HDR game presents |
 | **Game mode freezes, then goes black** (BIOS 5.11 and later; audio and controls keep working) | Panel Replay with selective update fails on this panel (`Selective fetch area calculation failed`), PSR1 freezes it later, and with PSR off LOBF keeps it black. No module parameter turns LOBF off | `oxp3-panel-fix.service` turns LOBF and PSR/Panel Replay off through xe debugfs before the display manager starts. Only on this panel with BIOS 5.11+ (`--force-panel` overrides). Reboot needed |
 | **VRR caps the frame rate at about 70-80 fps** (SteamOS 20261015.1000 and later) | Upstream display firmware DMC v2.36 (`i915/xe3lpd_dmc.bin`); v2.20 works (issue #1) | DMC v2.20 in `/usr/lib/firmware/updates`, which the kernel prefers. Intel firmware, redistributed unmodified ([`firmware/LICENSE.i915`](firmware/LICENSE.i915)). Reboot needed |
 | `xe ... DSB 0 poll error` message flood | The xe display state buffer fails on this panel | `options xe enable_dsb=0`. Cosmetic |
 | **Volume keys stick** when pressed quickly | The embedded controller drops key-release scancodes | `oxp3-volkey-fix.service` re-emits each volume key as press plus release on a virtual keyboard |
 | **Home, Console and Keyboard keys do nothing** | Reported through the MCU keyboard and vendor interfaces | InputPlumber composite device: Home → Steam menu, Console → Quick Access, Keyboard → on-screen keyboard |
+| **Home and G-key do nothing with the controllers on the connector dock** (issue #23) | The [controller connector](https://onexplayerstore.com/collections/accessories/products/controller-connector-for-onexplayer-x1) has its own chip (`1a86:fe02`) that sends these keys; stock InputPlumber 0.78 only reads the handheld's `fe00` and drops the G-key code | The patched InputPlumber, now installed for everyone (gyro stays opt-in), also reads `fe02` and maps the G-key to the Steam menu; the stock binary starts instead if the patched one cannot run |
 | **Back paddles M1 and M2 do not work** | They need hid-oxp to map them and switch the MCU report mode | hid-oxp maps them to two F13-F24 keys (F15/F16 on kernel 7.2.7) and InputPlumber turns them into the left and right paddle. The script only re-asserts the driver state through sysfs |
 | **No sound from the speakers after boot or resume** | The ALC245 jack detection briefly reports headphones; PipeWire keeps the Headphones profile with the speaker amp off | `oxp3-audio-route.service` selects the Speaker profile, only when the jack is empty but a Headphones profile is active |
 | **Battery shows 101-104 %** after a full charge | The gauge reports `energy_now` above `energy_full`, and Steam reads the raw sysfs value | `oxp3-battery-clamp.service` overlays corrected `capacity` / `energy_full` values |
@@ -82,7 +83,7 @@ This is the recovery-image method that works on this machine. You need a Windows
 | **Journal holds only the last hour, `/var/lib/steamos-log-submitter` grows by hundreds of MB an hour** | Panther Lake traps user-space split locks and Steam causes them continuously; every hit is logged and queued as a report | Kernel parameter `split_lock_detect=off` (like the Steam Deck); apply also deletes the queued split-lock reports. Reboot needed |
 | **Performance overlay: no CPU power, no GPU power or temperature** | The RAPL energy counters are root-only (CVE-2020-8694), and xe has no hwmon sensors for an integrated GPU | `oxp3-rapl-overlay.service` publishes coarse world-readable copies (0.5 s, 10 mJ) of the package, CPU core and GPU counters, and a patched mangoapp ([`mangoapp/`](mangoapp/README.md)) shows CPU power (cores), GPU power (RAPL PP1), GPU temperature (= package temperature) and a SoC total on levels 2-4. It falls back to the stock mangoapp when it cannot run |
 | **CPU boost is all or nothing** in SimpleDeckyTDP (optional, step 14) | With boost off the cores stop at their base clock; with boost on the E- and LP E-cores also clock up and take power the GPU could use | Installs [SimpleDeckyTDP-Intel](https://github.com/kas5852/SimpleDeckyTDP-Intel) by kas5852 (PR #24), whose CPU Boost is **Off / Smart / Full** per game. Smart caps P / E / LP E-cores at 3.0 / 2.0 / 1.5 GHz: RE4 at 30 W +12 % average fps, +48 % 1% low. See below |
-| **No gyroscope** (experimental, opt-in with `--gyro`) | The BMI260's ACPI node is named for the `bmi160` driver, which fails on it | ACPI override (BIOS 5.09) plus a patched InputPlumber. Drift is reduced, not eliminated. Details in [`gyro/`](gyro/README.md) |
+| **No gyroscope** (experimental, opt-in with `--gyro`) | The BMI260's ACPI node is named for the `bmi160` driver, which fails on it | ACPI override (BIOS 5.09); the patched InputPlumber above handles the sensor. Drift is reduced, not eliminated. Details in [`gyro/`](gyro/README.md) |
 
 ### Installing and running the fix pack
 
@@ -95,7 +96,7 @@ cd ~ && curl -fL https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releas
 ~/oxp3-fix/oxp3-apply-fixes.sh --revert    # undo everything, then reboot
 ```
 
-The archive extracts to `~/oxp3-fix`: the script, the desktop icons, and the binaries some steps use (patched InputPlumber for the gyro, patched mangoapp, the SimpleDeckyTDP-Intel zip, the xevmafix kernel module) with their source patches. Extracting a newer release over it updates it in place.
+The archive extracts to `~/oxp3-fix`: the script, the desktop icons, and the binaries some steps use (patched InputPlumber, patched mangoapp, the SimpleDeckyTDP-Intel zip, the xevmafix kernel module) with their source patches. Extracting a newer release over it updates it in place.
 
 **Desktop icons (optional).** For desktop mode, `OXP3-Fix.desktop` runs the fix pack and `OXP3-Revert.desktop` reverts it, each in a Konsole window where you type the sudo password and answer the questions:
 
@@ -114,9 +115,9 @@ Flags: `--yes`, `--force`, `--force-nvme`, `--force-panel`, `--no-wifi`, `--gyro
   - Smart needs "Enable Manual CPU Controls" in the plugin's advanced options. It sets the TDP like SimpleDeckyTDP, so the TDP sync works as before.
 - **On an older SteamOS build without Wi-Fi**, connect USB Ethernet or USB tethering before the first run so step 0 can download the firmware package.
 - Remove earlier hacks of your own first, such as boot-time `chvt` scripts or a masked `powerbuttond`.
-- Never unbind or rebind hid-oxp (kernel Oops, `issues/hid_oxp_oops_rebind.txt`), and do not write raw commands to the `1a86:fe00` hidraw device.
+- Never unbind or rebind hid-oxp (kernel Oops, `issues/hid_oxp_oops_rebind.txt`), and do not write raw commands to the `1a86:fe00` or `1a86:fe02` hidraw devices.
 - The volume key fix grabs the i8042 keyboard and forwards every key, including power, through a virtual device; keep that in mind with an external PS/2 keyboard.
-- Files go to `/etc`, `/home`, `/usr/lib/firmware` and `~/homebrew/plugins`. `--revert` removes them all except the Wi-Fi firmware.
+- Files go to `/etc`, `/home`, `/usr/lib/firmware`, `~/homebrew/plugins` and, with the gyro, `/boot`. `--revert` removes them all except the Wi-Fi firmware.
 
 ### Lighting
 
@@ -138,12 +139,13 @@ Upstream bug drafts are in `issues/`.
 
 ### Tested configuration
 
-SteamOS main 20261021.1000, kernel 7.2.7-valve2, OXP3 BIOS 5.09, panel SDC AMS881KB01-0, SSD Predator GM7 1TB. The panel fix was found and verified on BIOS 5.12. The script refuses to run on other DMI or OS values (`--force` overrides) and applies `nvme.noacpi=1` only with a GM7 / `1dee:1602` SSD (`--force-nvme` overrides). The gyro step needs BIOS 5.09 and InputPlumber 0.78.x.
+SteamOS main 20261021.1000, kernel 7.2.7-valve2, OXP3 BIOS 5.09, panel SDC AMS881KB01-0, SSD Predator GM7 1TB. The panel fix was found and verified on BIOS 5.12. The script refuses to run on other DMI or OS values (`--force` overrides) and applies `nvme.noacpi=1` only with a GM7 / `1dee:1602` SSD (`--force-nvme` overrides). The patched InputPlumber needs the stock InputPlumber to be 0.78.x; the gyro step also needs BIOS 5.09.
 
 ### Changelog
 
 Releases are named by date (`YYYYMMDD`) from 20261014 on.
 
+- **20261023**: the patched InputPlumber is installed for everyone (gyro stays opt-in) and also reads the controller connector, so Home and the G-key work with the controllers on the dock (issue #23).
 - **20261022**: big games no longer crash with "out of memory" after waking from sleep (step 15, xevmafix, contributed by kas5852 in PR #26). Overlay: when the kernel skips the GPU energy zone at boot, step 10 now brings it back, so GPU power and the SoC total no longer go missing.
 - **20261018-2**: optional SimpleDeckyTDP-Intel (step 14, contributed by kas5852 in PR #24) with an Off / Smart / Full CPU boost. A normal run asks once; the zip comes with the release archive; an installed SimpleDeckyTDP is replaced only after you confirm.
 - **20261018**: panel fix for BIOS 5.11 and later (step 13, PR #15). Content-driven HDR (PR #22). Overlay: CPU power is the cores only, new SoC total on levels 2-4, no empty VRAM item.

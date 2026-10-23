@@ -231,6 +231,92 @@ index 9e23672..4bb3fff 100644
          self.rotate_value(&mut gyro_input);
  
          Ok(Some(Event::Gyro(gyro_input)))
+diff --git a/src/drivers/oxp_hid/driver.rs b/src/drivers/oxp_hid/driver.rs
+index a5f2cf8..77f96a0 100644
+--- a/src/drivers/oxp_hid/driver.rs
++++ b/src/drivers/oxp_hid/driver.rs
+@@ -9,6 +9,8 @@ use super::hid_report::{ButtonId, InputDataReport};
+ 
+ pub const VID: u16 = 0x1a86;
+ pub const PID: u16 = 0xfe00;
++/// 0xfe00: handheld controller MCU, 0xfe02: controller connector (same B2 protocol)
++pub const PIDS: &[u16] = &[PID, 0xfe02];
+ pub const IID: i32 = 0x02;
+ 
+ const PACKET_SIZE: usize = 64;
+@@ -21,7 +23,7 @@ const CMD_BUTTON: u8 = 0xB2;
+ 
+ pub struct Driver {
+     device: HidDevice,
+-    btn_state: [bool; 0x25],
++    btn_state: [bool; 0x26],
+ }
+ 
+ /// Format first N bytes of a buffer as hex string for logging.
+@@ -45,13 +47,13 @@ impl Driver {
+             info.product_id(),
+             info.interface_number(),
+         );
+-        if info.vendor_id() != VID || info.product_id() != PID {
++        if info.vendor_id() != VID || !PIDS.contains(&info.product_id()) {
+             return Err(format!("Device '{path}' is not an OXP HID controller").into());
+         }
+ 
+         Ok(Self {
+             device,
+-            btn_state: [false; 0x25],
++            btn_state: [false; 0x26],
+         })
+     }
+ 
+@@ -115,7 +117,7 @@ impl Driver {
+             ButtonId::M1 => ButtonEvent::M1(BinaryInput { pressed }),
+             ButtonId::M2 => ButtonEvent::M2(BinaryInput { pressed }),
+             ButtonId::Keyboard => ButtonEvent::Keyboard(BinaryInput { pressed }),
+-            ButtonId::Guide => ButtonEvent::Guide(BinaryInput { pressed }),
++            ButtonId::Guide | ButtonId::GKey => ButtonEvent::Guide(BinaryInput { pressed }),
+             _ => return Ok(Vec::new()),
+         };
+ 
+diff --git a/src/drivers/oxp_tty/driver.rs b/src/drivers/oxp_tty/driver.rs
+index 41e6f17..930ace9 100644
+--- a/src/drivers/oxp_tty/driver.rs
++++ b/src/drivers/oxp_tty/driver.rs
+@@ -121,7 +121,7 @@ impl Driver {
+     /// Translate the report into individual events
+     fn translate_button(&mut self, state: ButtonDataReport) -> Event {
+         match state.button_id {
+-            ButtonId::None | ButtonId::Guide => Event::GamepadButton(GamepadButtonEvent::None),
++            ButtonId::None | ButtonId::Guide | ButtonId::GKey => Event::GamepadButton(GamepadButtonEvent::None),
+             ButtonId::A => Event::GamepadButton(GamepadButtonEvent::A(BinaryInput {
+                 pressed: state.status == ButtonStatus::Pressed,
+             })),
+diff --git a/src/drivers/oxp_tty/mod.rs b/src/drivers/oxp_tty/mod.rs
+index 3cb1b4f..2c329c9 100644
+--- a/src/drivers/oxp_tty/mod.rs
++++ b/src/drivers/oxp_tty/mod.rs
+@@ -29,6 +29,8 @@ pub enum ButtonId {
+     M1 = 0x22,
+     M2 = 0x23,
+     Keyboard = 0x24,
++    /// G-key as reported by the controller connector (1a86:fe02)
++    GKey = 0x25,
+ }
+ 
+ const TAKEOVER_COMMAND: [u8; 64] = [
+diff --git a/src/input/source/hidraw.rs b/src/input/source/hidraw.rs
+index 92a7b00..0038125 100644
+--- a/src/input/source/hidraw.rs
++++ b/src/input/source/hidraw.rs
+@@ -608,7 +608,7 @@ impl HidRawDevice {
+ 
+         // OXP X1 HID Controller
+         if vid == drivers::oxp_hid::driver::VID
+-            && pid == drivers::oxp_hid::driver::PID
++            && drivers::oxp_hid::driver::PIDS.contains(&pid)
+             && iid == drivers::oxp_hid::driver::IID
+         {
+             log::info!("Detected OXP X1 HID controller");
 diff --git a/src/input/source/iio/accel_gyro_3d.rs b/src/input/source/iio/accel_gyro_3d.rs
 index 737daca..6b22071 100644
 --- a/src/input/source/iio/accel_gyro_3d.rs

@@ -1,12 +1,16 @@
 #!/bin/bash
 # oxp3-steamos-fixes - ONEXPLAYER 3 (Intel Panther Lake) SteamOS fix pack
-# Version: 20261022       License: MIT (see LICENSE)     Author: HANA & Claude
+# Version: 20261023       License: MIT (see LICENSE)     Author: HANA & Claude
 # Tested on: SteamOS 3.10 main build 20260827.1000, kernel 7.2.0-valve1-1-neptune-72, OXP3 BIOS 5.09,
 #            panel Samsung SDC AMS881KB01-0, SSD Predator GM7 1TB (Biwin/Maxio 1dee:1602)
 # v1.1.0: gamescope HDR lua now also registers real 30-144Hz dynamic_modegen (this panel has genuine
 #         continuous VRR; the v1.0.1 lua declared dynamic_refresh_rates but never shipped the
 #         matching dynamic_modegen function, so no extra Hz options ever actually appeared in the
 #         Steam Performance panel's per-game refresh-rate selector).
+# 20261023: the patched InputPlumber is now part of step 5 for everyone, not only with the gyro: it also reads the
+#         controller connector (1a86:fe02, issue #23), whose Home and G-key (0x25) stock InputPlumber 0.78 ignores.
+#         The gyro step keeps only the ACPI override, its grub file, the tuning file and the IMU yaml keys; --no-gyro
+#         leaves the patched InputPlumber in place, --revert removes it. Same file names as before, no migration.
 # 20261022: new step 15, xevmafix (contributed by kas5852, PR #26): big games (FF7 Rebirth) crashed with "out of memory"
 #         right after waking from sleep, because xe rebinds every GPU mapping in one kmalloc array that goes past 4 MB.
 #         A small kernel module (release archive, sha256 pinned, kernel 7.2.7-valve2 only) lets that array come from
@@ -74,7 +78,7 @@
 #         the hid-oxp sysfs (driver pages 1-2 only, never raw hidraw); new --mcu-restore (DANGEROUS, explicit, confirmed)
 #         rewrites MCU button-table page 3 (Home 0x24 + factory-default 0x21/0x25-0x2B) to recover a Home/Xbox
 #         key that went silent after a foreign tool overwrote the MCU table.
-OXP3_FIXES_VERSION="20261022"
+OXP3_FIXES_VERSION="20261023"
 TESTED_STEAMOS_BUILD="20260827.1000"
 TESTED_KERNEL_PREFIX="7.2.0-valve1"
 # ============================================================================
@@ -90,10 +94,13 @@ TESTED_KERNEL_PREFIX="7.2.0-valve1"
 #        panel's per-game refresh-rate selector actually has more than one option
 #     4) volume-key fix service - the EC drops key releases; an evdev proxy synthesises them
 #     5) InputPlumber composite device + capability map - Home/Console/Keyboard keys, back paddles as L4/R4, single virtual gamepad
-#        (paddles rely on the in-kernel hid-oxp driver; this script only re-asserts its sysfs state, it never writes the MCU directly)
+#        (paddles rely on the in-kernel hid-oxp driver; this script only re-asserts its sysfs state, it never writes the MCU directly).
+#        InputPlumber runs as a patched 0.78.0 build (gyro/ in the repo, binary in the release archive) that also reads the
+#        controller connector (1a86:fe02) and its G-key; a launcher falls back to the stock binary if the build cannot run
 #     6) battery percentage clamp service - the gauge over-reports right after a full charge (103 %); a root service
 #        overlays corrected capacity / energy_full sysfs values so Steam and the performance overlay stay at <= 100 %
-#     7) [EXPERIMENTAL, opt-in] gyroscope - ACPI override so the kernel sees the BMI260 + patched InputPlumber (Steam Deck gyro)
+#     7) [EXPERIMENTAL, opt-in] gyroscope - ACPI override so the kernel sees the BMI260; the patched InputPlumber from step 5
+#        sends it as the Steam Deck gyro
 #     8) TDP sync service - the MSR package PL1 (obeyed by the GPU) follows the MMIO PL1 that TDP tools set
 #     9) kernel param split_lock_detect=off - stops the split-lock report flood (journal + steamos-log-submitter queue)
 #    10) CPU and GPU power/temperature in the performance overlay - a root service publishes coarse (0.5 s, 10 mJ) world-
@@ -192,21 +199,22 @@ AUDIO_RESUME_UNIT=/etc/systemd/system/oxp3-audio-resume.service  # runs the user
 AUDIO_USER="$(stat -c %U "$USER_HOME" 2>/dev/null || id -un)"
 IP_YAML=/etc/inputplumber/devices.d/50-onexplayer_3.yaml
 IP_CAPMAP=/etc/inputplumber/capability_maps.d/onexplayer_type3.yaml   # id oxp3: Home key -> Guide   # InputPlumber 0.78 override dir is devices.d
-# experimental gyro (step 7)
+# patched InputPlumber (step 5, everyone; the file names still carry "gyro" from when only the gyro step used it)
 GYRO_DIR="$USER_HOME/oxp3-fix"                               # in /home, survives updates
-GYRO_BIN="$GYRO_DIR/inputplumber-oxp3-gyro"                  # patched InputPlumber 0.78.0 (source: gyro/ in the repo)
-GYRO_LAUNCH="$GYRO_DIR/oxp3-inputplumber-launch.sh"          # starts GYRO_BIN, or the stock binary if GYRO_BIN cannot run
+IPF_BIN="$GYRO_DIR/inputplumber-oxp3-gyro"                   # patched InputPlumber 0.78.0 (source: gyro/ in the repo)
+IPF_LAUNCH="$GYRO_DIR/oxp3-inputplumber-launch.sh"           # starts IPF_BIN, or the stock binary if IPF_BIN cannot run
+IPF_DROPIN=/etc/systemd/system/inputplumber.service.d/oxp3-gyro-fork.conf
+IPF_IP_SERIES="0.78"                                         # the patched build is InputPlumber 0.78.0
+IPF_BIN_SHA256="c4598b4aff064edc51a6bb2331ba5b608b2e9e11ed863c568679829ae5348966"
+# experimental gyro (step 7)
 GYRO_ON_FILE="$GYRO_DIR/gyro.enabled"                        # the user opted in
 GYRO_OFF_FILE="$GYRO_DIR/gyro.declined"                      # the user said no (do not ask again)
-GYRO_DROPIN=/etc/systemd/system/inputplumber.service.d/oxp3-gyro-fork.conf
 GYRO_CONF=/etc/inputplumber/oxp3-gyro-steer.conf             # tuning, hot-reloaded every 2 s, never overwritten once it exists
 ACPI_IMG=/boot/acpi_override.img
 GRUB_IMU_FILE=/etc/default/grub.d/oxp3-imu.cfg
 GYRO_BIOS="5.09"                                             # the ACPI override is a patched copy of this BIOS's SSDT26
-GYRO_IP_SERIES="0.78"                                        # the patched build is InputPlumber 0.78.0
-GYRO_BIN_SHA256="1107d95c34863c7865cac64183673135098d77265a32763c22fc7efbc1893aa3"
-PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261022/oxp3-fix.tar.gz"
-GYRO_PKG_URL="$PKG_URL"   # release archive holding the binary
+PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261023/oxp3-fix.tar.gz"
+IPF_PKG_URL="$PKG_URL"   # release archive holding the binary
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"                  # the extracted release archive, if the script came from it
 ACPI_IMG_SHA256="0e9b716e65978ac7365fda6fddf476a18b352a2d1ed98f4f30c8d3f8558b2113"
 ACPI_IMG_OLD_SHA256="2d1a0a88e4cfe694cd4edc9b0d0a5e28f7f3f5bb9ccdcf7cbf1d5d01a02d42ad"   # earlier build of the same table (long cpio member name)
@@ -611,6 +619,13 @@ source_devices:
     hidraw:
       vendor_id: 0x1a86
       product_id: 0xfe00
+      interface_num: 2
+  # Controller connector (detached controllers on the connector dock): its own chip 1a86:fe02 sends Home (0x24) and the
+  # G-key (0x25) in the same B2 frames on interface 2. Only the patched InputPlumber reads it (stock 0.78 knows only fe00).
+  - group: gamepad
+    hidraw:
+      vendor_id: 0x1a86
+      product_id: 0xfe02
       interface_num: 2
   # IMU (BMI160 currently fails to probe on this board: "Error reading chip id" -121; kept for when the kernel/BIOS fix lands)
   - group: imu
@@ -1138,25 +1153,25 @@ GRUB_EARLY_INITRD_LINUX_CUSTOM="acpi_override.img"
 EOT
 )
 
-GYRO_LAUNCH_CONTENT=$(cat <<'EOT'
+IPF_LAUNCH_CONTENT=$(cat <<'EOT'
 #!/bin/sh
-# Starts the OXP3 gyro build of InputPlumber (systemd drop-in oxp3-gyro-fork.conf). If that binary cannot run (a library it needs
+# Starts the patched OXP3 build of InputPlumber (systemd drop-in oxp3-gyro-fork.conf). If that binary cannot run (a library it needs
 # is gone after an OS update) or the stock InputPlumber is no longer the 0.78 series it was built from, the stock binary starts instead,
-# so the gamepad never depends on the experimental build.
+# so the gamepad never depends on the patched build.
 B=__GYRO_BIN__
 STOCK=/usr/bin/inputplumber
 case "$($STOCK --version 2>/dev/null)" in
     *" __GYRO_IP_SERIES__."*)
         if [ -x "$B" ] && ! ldd "$B" 2>&1 | grep -q 'not found'; then exec "$B"; fi ;;
 esac
-echo "oxp3: gyro InputPlumber build unusable here, starting the stock inputplumber" >&2
+echo "oxp3: patched InputPlumber build unusable here, starting the stock inputplumber" >&2
 exec "$STOCK"
 EOT
 )
 
-GYRO_DROPIN_CONTENT=$(cat <<'EOT'
-# OXP3 gyro (experimental): run the patched InputPlumber through a launcher that falls back to the stock binary.
-# Revert: ./oxp3-apply-fixes.sh --no-gyro
+IPF_DROPIN_CONTENT=$(cat <<'EOT'
+# OXP3: run the patched InputPlumber (controller connector keys, gyro) through a launcher that falls back to the stock binary.
+# Revert: ./oxp3-apply-fixes.sh --revert
 [Service]
 ExecStart=
 ExecStart=__GYRO_LAUNCH__
@@ -1385,9 +1400,9 @@ iZ2tm9jpyMTODpnY2YaJnR02sbMtEzt7Jt4zcc5pZWLnATKx08rEu2wgNv2fe+0/ncY1fi7VG6XpETYx
 UQAA
 EOT
 )
-GYRO_LAUNCH_CONTENT="${GYRO_LAUNCH_CONTENT//__GYRO_BIN__/$GYRO_BIN}"
-GYRO_LAUNCH_CONTENT="${GYRO_LAUNCH_CONTENT//__GYRO_IP_SERIES__/$GYRO_IP_SERIES}"
-GYRO_DROPIN_CONTENT="${GYRO_DROPIN_CONTENT//__GYRO_LAUNCH__/$GYRO_LAUNCH}"
+IPF_LAUNCH_CONTENT="${IPF_LAUNCH_CONTENT//__GYRO_BIN__/$IPF_BIN}"
+IPF_LAUNCH_CONTENT="${IPF_LAUNCH_CONTENT//__GYRO_IP_SERIES__/$IPF_IP_SERIES}"
+IPF_DROPIN_CONTENT="${IPF_DROPIN_CONTENT//__GYRO_LAUNCH__/$IPF_LAUNCH}"
 
 # ---- helpers ------------------------------------------------------
 say()  { printf '%s\n' "$*"; }
@@ -1483,36 +1498,47 @@ panel_debugfs() { sudo -n sh -c "cat /sys/kernel/debug/dri/*/$1" 2>/dev/null | s
 IMU_ACTIVE=0; [ -e /sys/bus/i2c/devices/i2c-BMI0260:00 ] && IMU_ACTIVE=1     # the ACPI override is live in the running kernel
 BIOS_VER="$(cat /sys/class/dmi/id/bios_version 2>/dev/null || true)"
 IP_VER="$(/usr/bin/inputplumber --version 2>/dev/null | awk '{print $2}' || true)"
-# prints why the gyro step cannot be used here (nothing when it can)
+# prints why the patched InputPlumber (step 5) cannot be used here (nothing when it can)
+ipf_block_reason() {
+    if ! have_ip; then echo "InputPlumber is not installed"; return 0; fi
+    if [ "$FORCE" = 1 ]; then return 0; fi
+    case "$IP_VER" in "$IPF_IP_SERIES".*) ;; *) echo "InputPlumber is '${IP_VER:-?}', the patched build is for the $IPF_IP_SERIES series (--force overrides)"; return 0 ;; esac
+}
+IPF_BLOCK="$(ipf_block_reason)"
+# prints why the gyro step cannot be used here (nothing when it can); it needs the patched InputPlumber
 gyro_block_reason() {
+    if [ -n "$IPF_BLOCK" ]; then echo "$IPF_BLOCK"; return 0; fi
     if [ "$FORCE" = 1 ]; then return 0; fi
     if [ "$BIOS_VER" != "$GYRO_BIOS" ]; then echo "BIOS is '${BIOS_VER:-?}', the ACPI override only matches BIOS $GYRO_BIOS (--force overrides)"; return 0; fi
-    if ! have_ip; then echo "InputPlumber is not installed"; return 0; fi
-    case "$IP_VER" in "$GYRO_IP_SERIES".*) ;; *) echo "InputPlumber is '${IP_VER:-?}', the patched build is for the $GYRO_IP_SERIES series (--force overrides)"; return 0 ;; esac
 }
 GYRO_WANT=0
 if [ "$GYRO_REQ" = 1 ]; then GYRO_WANT=1
 elif [ "$GYRO_REQ" = 0 ]; then GYRO_WANT=0
-elif [ -f "$GYRO_ON_FILE" ] || [ -f "$GYRO_DROPIN" ]; then GYRO_WANT=1; fi     # opted in earlier (or installed by hand)
+elif [ -f "$GYRO_ON_FILE" ] || [ -f "$GRUB_IMU_FILE" ]; then GYRO_WANT=1; fi     # opted in earlier (or installed by hand)
 GYRO_BLOCK="$(gyro_block_reason)"
 GYRO_ON=0; GYRO_DECLINED=0
 if [ "$GYRO_WANT" = 1 ] && [ -z "$GYRO_BLOCK" ]; then GYRO_ON=1; set_gyro_yaml; fi
-gyro_bin_ok() { [ -f "$GYRO_BIN" ] && [ "$(sha256sum "$GYRO_BIN" | cut -d' ' -f1)" = "$GYRO_BIN_SHA256" ]; }
+ipf_bin_ok() { [ -f "$IPF_BIN" ] && [ "$(sha256sum "$IPF_BIN" | cut -d' ' -f1)" = "$IPF_BIN_SHA256" ]; }
+ipf_installed() { [ -f "$IPF_DROPIN" ] || [ -f "$IPF_LAUNCH" ] || [ -f "$IPF_BIN" ]; }
 acpi_img_sha() { sha256sum "$ACPI_IMG" 2>/dev/null | cut -d' ' -f1 || true; }
-gyro_installed() { [ -f "$GYRO_DROPIN" ] || [ -f "$GYRO_LAUNCH" ] || [ -f "$GYRO_BIN" ] || [ -f "$GYRO_CONF" ] || [ -f "$GRUB_IMU_FILE" ] || [ -f "$GYRO_ON_FILE" ] \
+gyro_installed() { [ -f "$GYRO_CONF" ] || [ -f "$GRUB_IMU_FILE" ] || [ -f "$GYRO_ON_FILE" ] \
     || [ "$(acpi_img_sha)" = "$ACPI_IMG_SHA256" ] || [ "$(acpi_img_sha)" = "$ACPI_IMG_OLD_SHA256" ]; }
 sudo_put() { # sudo_put <file> <content>: write as root when it differs; returns 1 when unchanged
     if same_content "$1" "$2"; then say "  [skip] $1 unchanged"; return 1; fi
     sudo mkdir -p "$(dirname "$1")"; printf '%s\n' "$2" | sudo tee "$1" >/dev/null; say "  [write] $1"; return 0
 }
+# back to the stock InputPlumber binary
+remove_ipf() {
+    if [ -f "$IPF_DROPIN" ]; then
+        sudo rm -f "$IPF_DROPIN"; sudo rmdir "$(dirname "$IPF_DROPIN")" 2>/dev/null || true; sudo systemctl daemon-reload
+        say "  [remove] $IPF_DROPIN (InputPlumber is the stock binary again)"; IP_RESTART=1; CHANGED=1
+    fi
+    for _f in "$IPF_LAUNCH" "$IPF_BIN" "$IPF_BIN.part"; do [ -f "$_f" ] && { rm -f "$_f"; say "  [remove] $_f"; }; done
+    return 0
+}
 # take every gyro file away again (the grub reference goes before the image, so the boot menu never points at a missing file)
 remove_gyro() {
     local _cur
-    if [ -f "$GYRO_DROPIN" ]; then
-        sudo rm -f "$GYRO_DROPIN"; sudo rmdir "$(dirname "$GYRO_DROPIN")" 2>/dev/null || true; sudo systemctl daemon-reload
-        say "  [remove] $GYRO_DROPIN (InputPlumber is the stock binary again)"; IP_RESTART=1; CHANGED=1
-    fi
-    for _f in "$GYRO_LAUNCH" "$GYRO_BIN" "$GYRO_BIN.part"; do [ -f "$_f" ] && { rm -f "$_f"; say "  [remove] $_f"; }; done
     if [ -f "$GYRO_CONF" ]; then sudo rm -f "$GYRO_CONF"; say "  [remove] $GYRO_CONF"; fi
     if [ -f "$GRUB_IMU_FILE" ]; then
         sudo rm -f "$GRUB_IMU_FILE"; say "  [remove] $GRUB_IMU_FILE"; sudo update-grub; CHANGED=1
@@ -1633,8 +1659,13 @@ if xe_gpu; then
     else XEVMA_STATE="not available for kernel $KVER (the module is built for $XEVMA_FOR)"; fi
     say "  games after sleep (xevmafix) : $XEVMA_STATE"
 fi
+if [ -n "$IPF_BLOCK" ]; then
+    say "  patched InputPlumber : not used - $IPF_BLOCK"
+else
+    say "  patched InputPlumber : $(ipf_bin_ok && same_content "$IPF_DROPIN" "$IPF_DROPIN_CONTENT" && echo "in place" || echo "missing or differs (apply installs it)")"
+fi
 if [ "$GYRO_ON" = 1 ]; then
-    say "  gyro (experimental) : enabled ; IMU $([ "$IMU_ACTIVE" = 1 ] && echo "visible to the kernel (ACPI override active)" || echo "NOT visible yet (ACPI override not loaded: reboot needed)") ; patched InputPlumber $(gyro_bin_ok && echo present || echo missing)"
+    say "  gyro (experimental) : enabled ; IMU $([ "$IMU_ACTIVE" = 1 ] && echo "visible to the kernel (ACPI override active)" || echo "NOT visible yet (ACPI override not loaded: reboot needed)")"
 elif [ "$GYRO_WANT" = 1 ]; then
     say "  gyro (experimental) : wanted but unavailable - $GYRO_BLOCK"
 else
@@ -1747,10 +1778,14 @@ if [ "$MODE" = "--check" ]; then
     same_content "$IP_YAML" "$IP_YAML_CONTENT" || { say "  [diff] IP yaml missing or differs"; ok=0; }
     same_content "$IP_CAPMAP" "$IP_CAPMAP_CONTENT" || { say "  [diff] IP capability map missing or differs"; ok=0; }
     systemctl is-enabled -q inputplumber.service 2>/dev/null || { say "  [diff] inputplumber.service not enabled"; ok=0; }
+    if [ -z "$IPF_BLOCK" ]; then
+        ipf_bin_ok || { say "  [diff] patched InputPlumber missing or differs (apply downloads it)"; ok=0; }
+        same_content "$IPF_LAUNCH" "$IPF_LAUNCH_CONTENT" || { say "  [diff] InputPlumber launcher missing or differs"; ok=0; }
+        same_content "$IPF_DROPIN" "$IPF_DROPIN_CONTENT" || { say "  [diff] InputPlumber systemd drop-in missing or differs"; ok=0; }
+    else
+        say "  [info] the patched InputPlumber cannot be used here: $IPF_BLOCK"
+    fi
     if [ "$GYRO_ON" = 1 ]; then
-        gyro_bin_ok || { say "  [diff] patched InputPlumber missing or differs (apply downloads it)"; ok=0; }
-        same_content "$GYRO_LAUNCH" "$GYRO_LAUNCH_CONTENT" || { say "  [diff] gyro launcher missing or differs"; ok=0; }
-        same_content "$GYRO_DROPIN" "$GYRO_DROPIN_CONTENT" || { say "  [diff] gyro systemd drop-in missing or differs"; ok=0; }
         [ -f "$GYRO_CONF" ] || { say "  [diff] $GYRO_CONF missing"; ok=0; }
         [ "$(acpi_img_sha)" = "$ACPI_IMG_SHA256" ] || { say "  [diff] $ACPI_IMG missing or differs"; ok=0; }
         same_content "$GRUB_IMU_FILE" "$GRUB_IMU_CONTENT" || { say "  [diff] $GRUB_IMU_FILE missing or differs"; ok=0; }
@@ -1820,6 +1855,7 @@ if [ "$MODE" = "--revert" ]; then
     if [ -f "$MODPROBE_FILE" ]; then sudo rm -f "$MODPROBE_FILE"; say "  removed $MODPROBE_FILE"; NEED_REBOOT=1; fi
     if gyro_installed; then remove_gyro; fi
     rm -f "$GYRO_ON_FILE" "$GYRO_OFF_FILE"
+    if ipf_installed; then remove_ipf; fi
     if [ -f "$SDTDP_ON_FILE" ]; then remove_sdtdp; fi
     rm -f "$SDTDP_ON_FILE" "$SDTDP_OFF_FILE"
     if [ -f "$IP_CAPMAP" ]; then sudo rm -f "$IP_CAPMAP"; say "  removed $IP_CAPMAP"; fi
@@ -1857,8 +1893,8 @@ fi
 if [ "$GYRO_REQ" = "" ] && [ "$GYRO_ON" = 0 ] && [ "$GYRO_WANT" = 0 ] && [ -z "$GYRO_BLOCK" ] && [ ! -f "$GYRO_OFF_FILE" ] && [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then
     say ""
     say "  Optional, EXPERIMENTAL: gyroscope. The kernel cannot see this device's Bosch BMI260 on its own. Enabling this installs"
-    say "  an ACPI table override (needs a reboot) and swaps InputPlumber for a patched build from the project's GitHub release"
-    say "  (sha256-checked; it falls back to the stock binary automatically if it cannot run). Steam's gyro settings then work."
+    say "  an ACPI table override (needs a reboot); the patched InputPlumber from step 5 then sends the gyro to Steam, and"
+    say "  Steam's gyro settings work."
     say "  Drift is reduced but not eliminated. Undo any time with: $0 --no-gyro"
     read -r -p "  Enable the experimental gyro support? (y/N) " _ans
     case "$_ans" in
@@ -1912,12 +1948,17 @@ say "   2) $MODPROBE_FILE (xe enable_dsb=0)"
 say "   3) $LUA_HDR (gamescope HDR lua) and remove 99-oxp3-nohdr.lua"
 say "   4) $VOLKEY_PY + $VOLKEY_UNIT (volume-key fix)   $(have_evdev && echo "[python3-evdev OK]" || echo "[SKIPPED: python3 evdev missing]")"
 say "   5) $IP_YAML + $IP_CAPMAP + enable inputplumber   $(have_ip && echo "[inputplumber OK]" || echo "[SKIPPED: inputplumber missing]")"
+if [ -n "$IPF_BLOCK" ]; then
+    say "      + patched InputPlumber: [SKIPPED: $IPF_BLOCK]"
+else
+    say "      + patched InputPlumber $(ipf_bin_ok && echo "[present]" || echo "[from the release archive]") + $IPF_DROPIN (controller connector keys; falls back to the stock binary)"
+fi
 say "      + paddle driver state: hid-oxp gamepad_mode=xinput, button_m1/m2 = two different F13-F24 keys   $([ -n "$OXP_DEV" ] && echo "[hid-oxp OK]" || echo "[SKIPPED: hid-oxp not bound]")"
 say "   6) $BATT_SH + $BATT_UNIT (battery percentage clamp)   $([ -r /sys/class/power_supply/BAT0/energy_now ] && echo "[battery OK]" || echo "[SKIPPED: no energy_* battery]")"
 if [ "$GYRO_REQ" = 0 ]; then
-    say "   7) gyro (experimental): REMOVE the ACPI override, the patched InputPlumber and its files (--no-gyro)"
+    say "   7) gyro (experimental): REMOVE the ACPI override and its files (--no-gyro); the patched InputPlumber stays"
 elif [ "$GYRO_ON" = 1 ]; then
-    say "   7) gyro (experimental): $ACPI_IMG + $GRUB_IMU_FILE (ACPI override, update-grub), patched InputPlumber $(gyro_bin_ok && echo "[present]" || echo "[from the release archive]") + $GYRO_DROPIN"
+    say "   7) gyro (experimental): $ACPI_IMG + $GRUB_IMU_FILE (ACPI override, update-grub) + $GYRO_CONF"
 elif [ "$GYRO_WANT" = 1 ]; then
     say "   7) gyro (experimental): [SKIPPED: $GYRO_BLOCK]"
 else
@@ -2167,36 +2208,56 @@ elif [ "$VOLKEY_RESTART" = 1 ]; then
 fi
 fi
 
-# e2b. gyroscope (EXPERIMENTAL, opt-in; runs before e3 because the InputPlumber yaml and restart below depend on it)
+# e2a. patched InputPlumber (everyone; runs before e2b and e3 because the gyro step, the yaml and the restart below depend on it)
 mkdir -p "$GYRO_DIR"
+IPF_OK=0
+if [ -n "$IPF_BLOCK" ]; then
+    say "  [skip] patched InputPlumber: $IPF_BLOCK; the stock binary runs"
+else
+    IPF_OK=1
+    # keep the verified copy, else take it from the release archive next to the script, else download the archive and
+    # extract it; the sha256 is checked every time
+    if ipf_bin_ok; then
+        say "  [skip] $IPF_BIN unchanged"
+    elif [ "$SCRIPT_DIR/inputplumber-oxp3-gyro" != "$IPF_BIN" ] && [ -f "$SCRIPT_DIR/inputplumber-oxp3-gyro" ] \
+        && [ "$(sha256sum "$SCRIPT_DIR/inputplumber-oxp3-gyro" | cut -d' ' -f1)" = "$IPF_BIN_SHA256" ]; then
+        install -m 755 "$SCRIPT_DIR/inputplumber-oxp3-gyro" "$IPF_BIN"; say "  [write] $IPF_BIN (from the release archive, sha256 verified)"; CHANGED=1; IP_RESTART=1
+    elif ! command -v curl >/dev/null 2>&1 || ! ip route 2>/dev/null | grep -q '^default'; then
+        say "  [error] the patched InputPlumber is not on this machine and there is no network to download it"; IPF_OK=0
+    else
+        say "  [run] downloading the release archive ($IPF_PKG_URL, about 7 MB) ..."
+        _tmp="$(mktemp -d "${TMPDIR:-/tmp}/oxp3-pkg.XXXXXX")"
+        if curl -fL --retry 3 --progress-bar -o "$_tmp/pkg.tar.gz" "$IPF_PKG_URL" \
+            && tar -xzf "$_tmp/pkg.tar.gz" -C "$_tmp" oxp3-fix/inputplumber-oxp3-gyro \
+            && [ "$(sha256sum "$_tmp/oxp3-fix/inputplumber-oxp3-gyro" | cut -d' ' -f1)" = "$IPF_BIN_SHA256" ]; then
+            install -m 755 "$_tmp/oxp3-fix/inputplumber-oxp3-gyro" "$IPF_BIN"; say "  [write] $IPF_BIN (sha256 verified)"; CHANGED=1; IP_RESTART=1
+        else
+            say "  [error] download failed or the sha256 of the patched InputPlumber does not match"; IPF_OK=0
+        fi
+        rm -rf "$_tmp"
+    fi
+    if [ "$IPF_OK" = 1 ] && ldd "$IPF_BIN" 2>&1 | grep -q 'not found'; then
+        say "  [error] the patched InputPlumber needs libraries this SteamOS build does not have:"; ldd "$IPF_BIN" 2>&1 | grep 'not found'; IPF_OK=0
+    fi
+    if [ "$IPF_OK" = 1 ]; then
+        printf '%s\n' "$IPF_LAUNCH_CONTENT" > "$IPF_LAUNCH.new"; chmod +x "$IPF_LAUNCH.new"
+        if [ -f "$IPF_LAUNCH" ] && cmp -s "$IPF_LAUNCH.new" "$IPF_LAUNCH"; then rm -f "$IPF_LAUNCH.new"; say "  [skip] $IPF_LAUNCH unchanged"
+        else mv -f "$IPF_LAUNCH.new" "$IPF_LAUNCH"; say "  [write] $IPF_LAUNCH"; CHANGED=1; IP_RESTART=1; fi
+        if sudo_put "$IPF_DROPIN" "$IPF_DROPIN_CONTENT"; then sudo systemctl daemon-reload; CHANGED=1; IP_RESTART=1; fi
+        say "  patched InputPlumber in place (controller connector support; the gyro step builds on it)"
+    else
+        say "  patched InputPlumber NOT installed: see the errors above; the stock binary runs (no connector keys, no gyro)"
+    fi
+fi
+
+# e2b. gyroscope (EXPERIMENTAL, opt-in; runs before e3 because the InputPlumber yaml and restart below depend on it)
 if [ "$GYRO_REQ" = 0 ]; then
     if gyro_installed; then say "  [gyro] removing the experimental gyro support (--no-gyro)"; remove_gyro; else say "  [skip] gyro: nothing installed"; fi
     rm -f "$GYRO_ON_FILE"; : > "$GYRO_OFF_FILE"
 elif [ "$GYRO_WANT" = 1 ] && [ -n "$GYRO_BLOCK" ]; then
     say "  [skip] gyro (experimental): $GYRO_BLOCK"
 elif [ "$GYRO_ON" = 1 ]; then
-    GYRO_OK=1
-    # patched InputPlumber: keep the verified copy, else take it from the release archive next to the script, else download
-    # the archive and extract it; the sha256 is checked every time
-    if gyro_bin_ok; then
-        say "  [skip] $GYRO_BIN unchanged"
-    elif [ "$SCRIPT_DIR/inputplumber-oxp3-gyro" != "$GYRO_BIN" ] && [ -f "$SCRIPT_DIR/inputplumber-oxp3-gyro" ]         && [ "$(sha256sum "$SCRIPT_DIR/inputplumber-oxp3-gyro" | cut -d' ' -f1)" = "$GYRO_BIN_SHA256" ]; then
-        install -m 755 "$SCRIPT_DIR/inputplumber-oxp3-gyro" "$GYRO_BIN"; say "  [write] $GYRO_BIN (from the release archive, sha256 verified)"; CHANGED=1; IP_RESTART=1
-    elif ! command -v curl >/dev/null 2>&1 || ! ip route 2>/dev/null | grep -q '^default'; then
-        say "  [error] gyro: the patched InputPlumber is not on this machine and there is no network to download it"; GYRO_OK=0
-    else
-        say "  [run] downloading the release archive ($GYRO_PKG_URL, about 4 MB) ..."
-        _tmp="$(mktemp -d "${TMPDIR:-/tmp}/oxp3-pkg.XXXXXX")"
-        if curl -fL --retry 3 --progress-bar -o "$_tmp/pkg.tar.gz" "$GYRO_PKG_URL"             && tar -xzf "$_tmp/pkg.tar.gz" -C "$_tmp" oxp3-fix/inputplumber-oxp3-gyro             && [ "$(sha256sum "$_tmp/oxp3-fix/inputplumber-oxp3-gyro" | cut -d' ' -f1)" = "$GYRO_BIN_SHA256" ]; then
-            install -m 755 "$_tmp/oxp3-fix/inputplumber-oxp3-gyro" "$GYRO_BIN"; say "  [write] $GYRO_BIN (sha256 verified)"; CHANGED=1; IP_RESTART=1
-        else
-            say "  [error] gyro: download failed or the sha256 does not match"; GYRO_OK=0
-        fi
-        rm -rf "$_tmp"
-    fi
-    if [ "$GYRO_OK" = 1 ] && ldd "$GYRO_BIN" 2>&1 | grep -q 'not found'; then
-        say "  [error] gyro: the patched InputPlumber needs libraries this SteamOS build does not have:"; ldd "$GYRO_BIN" 2>&1 | grep 'not found'; GYRO_OK=0
-    fi
+    GYRO_OK="$IPF_OK"
     # ACPI override image (never replace an acpi_override.img that is not ours)
     if [ "$GYRO_OK" = 1 ]; then
         _cur="$(acpi_img_sha)"
@@ -2226,15 +2287,11 @@ elif [ "$GYRO_ON" = 1 ]; then
         [ "$IMU_ACTIVE" = 1 ] || NEED_REBOOT=1
     fi
     if [ "$GYRO_OK" = 1 ]; then
-        printf '%s\n' "$GYRO_LAUNCH_CONTENT" > "$GYRO_LAUNCH.new"; chmod +x "$GYRO_LAUNCH.new"
-        if [ -f "$GYRO_LAUNCH" ] && cmp -s "$GYRO_LAUNCH.new" "$GYRO_LAUNCH"; then rm -f "$GYRO_LAUNCH.new"; say "  [skip] $GYRO_LAUNCH unchanged"
-        else mv -f "$GYRO_LAUNCH.new" "$GYRO_LAUNCH"; say "  [write] $GYRO_LAUNCH"; CHANGED=1; IP_RESTART=1; fi
-        if sudo_put "$GYRO_DROPIN" "$GYRO_DROPIN_CONTENT"; then sudo systemctl daemon-reload; CHANGED=1; IP_RESTART=1; fi
         if [ ! -f "$GYRO_CONF" ]; then sudo_put "$GYRO_CONF" "$GYRO_CONF_CONTENT" || true; CHANGED=1; else say "  [skip] $GYRO_CONF exists (your tuning is kept)"; fi
         rm -f "$GYRO_OFF_FILE"; : > "$GYRO_ON_FILE"
         say "  gyro (experimental) enabled$([ "$IMU_ACTIVE" = 1 ] || echo "; the IMU appears after the reboot")"
     else
-        say "  gyro (experimental) NOT enabled: see the errors above; InputPlumber stays configured for the stock build."
+        say "  gyro (experimental) NOT enabled: see the errors above; InputPlumber is configured without the IMU."
         set_base_yaml
     fi
 else
