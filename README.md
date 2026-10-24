@@ -116,6 +116,10 @@ It asks once about the two optional parts (the gyroscope and SimpleDeckyTDP-Inte
 - Files go to `/etc`, `/home`, `/usr/lib/firmware`, `~/homebrew/plugins` and, with the gyro, `/boot`. `--revert` removes all of them except the Wi-Fi firmware.
 - **Lighting** isn't touched. From kernel 7.2.7 (SteamOS 20261013.1000) hid-oxp drives the three light zones natively (`oxp:rgb:joystick_rings`, `oxp:rgb:guide_button`, `oxp:rgb:rear_logo`). For a UI use the [modified fork of HueSync](https://github.com/HHHHanasak1/HueSync/tree/oxp3), a Decky plugin with three separate zones.
 
+### Game pack (optional)
+
+[oxp3-game-pack](https://github.com/kas5852/oxp3-game-pack) by kas5852 is a separate project with patched Intel Vulkan driver builds and measured per-game settings for Final Fantasy VII Rebirth, Cyberpunk 2077 and Resident Evil 4. At 30 W it measured FF7 Rebirth 52.6 → 72.7 fps, Cyberpunk 2077 59.0 → 79.3 fps (built-in benchmark) and RE4 89.8 → 95.4 fps. The fix pack doesn't need it. It installs without sudo, changes no system files and loads only for the games you give its launch option. Install it after the fix pack (with step 14 for the RE4 profile) and follow its README.
+
 ## Known issues and limitations
 
 - **Gyroscope drift is only reduced.** The BMI260's yaw bias changes with temperature and gravity can't correct it. The patched InputPlumber lets the angle relax towards the centre (20 s time constant), which turns a constant bias into an offset of about 1-2 degrees. See [`gyro/README.md`](gyro/README.md).
