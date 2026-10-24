@@ -1,0 +1,13 @@
+[Unit]
+Description=OXP3 gyro: bind the BMI260 IMU to a patched bmi270 driver
+After=systemd-modules-load.service systemd-udev-settle.service
+Before=inputplumber.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/etc/oxp3-gyro/oxp3-gyro-load.sh start
+ExecStop=/etc/oxp3-gyro/oxp3-gyro-load.sh stop
+
+[Install]
+WantedBy=multi-user.target

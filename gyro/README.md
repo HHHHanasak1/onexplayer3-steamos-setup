@@ -16,6 +16,23 @@ Since release 20261023 the patched InputPlumber is installed for everyone as par
 
 On BIOS 5.12 (09/07/2026, EC 0.13) the firmware's `SSDT26` is the same table as on 5.09: same length (0x517C) and OEM revision (0x1000), and its decompiled source differs from [`SSDT26-oxp3-imu.dsl`](SSDT26-oxp3-imu.dsl) only by the override's own edits (OEM revision 0x1001, the `BMI0260` ids and the mount-matrix `_DSD`). At boot `bmi160_i2c` now reads the chip id and reports `Chip id not found: 27`, which is 0x27, the BMI260's id; on 5.09 the read itself failed with -121. So the 5.09 override probably fits 5.12 as well, but that has not been tried yet: the script still skips the gyro step on 5.12 unless you pass `--force`.
 
+### Without the ACPI override (BIOS 5.12, stock InputPlumber)
+
+[`no-override/`](no-override/) is a separate, opt-in route that needs no ACPI override, no reboot and no patched InputPlumber. It is tested on BIOS 5.12 only.
+
+- **How it works:** at boot `oxp3-gyro.service` takes the running kernel's own `bmi270_i2c.ko` and makes a copy in `/run`. In the copy it changes the module's one `BMI0160` ACPI id to `10EC5280` and strips the signature. It then unbinds the IMU from `bmi160_i2c` and loads the copy. `bmi270_i2c` loads `bmi260-init-data.fw` (SteamOS already ships it, and a copy is bundled in `/etc/oxp3-gyro/firmware` in case it ever goes away) and exposes a normal IIO device named `bmi260`. Stock InputPlumber 0.78 picks that device up live, so after install no restart is needed for the sensor.
+- **Mount matrix:** one key added to the IMU entry in the fix pack's yaml. With stock 0.78 it is `x: [0, -1, 0]`, `y: [0, 0, 1]`, `z: [-1, 0, 0]`. Verified in game: gyro as mouse turns and tilts the right way.
+- **Survives updates:** every file is in `/etc`. The module is re-patched from whatever kernel is running, so a SteamOS update needs no re-run. If the fix pack is re-run, it rewrites the yaml without the matrix key; `oxp3-gyro.service` puts the key back at the next boot.
+- **After sleep:** `oxp3-gyro-resume.service` reloads the driver if the sensor went silent across sleep.
+- **Install / remove:** `gyro/no-override/install.sh` and `gyro/no-override/uninstall.sh`. Install refuses if step 7 is installed or its override is active.
+
+Trade-offs:
+
+- **Kernel taint:** while the copy is loaded the kernel is tainted `E` (unsigned module).
+- **bmi160 rebinding:** once the BMI260 has been initialised, `bmi160_i2c` can no longer probe it (-121) until a reboot. Nothing used that binding anyway.
+- **CPU cost:** stock InputPlumber 0.78 reads the six IIO channels through sysfs on every 2.5 ms poll. That is about 9% of one core and roughly +0.2 W while the IMU is bound. `sudo systemctl stop oxp3-gyro` turns it off until the next boot.
+- **Scale and axes:** stock 0.78 sends the gyro at 12 instead of 16 counts per deg/s (raise Steam's gyro sensitivity to compensate) and passes the accelerometer through unscaled. Gyro to mouse and gyro to joystick work; modes that rely on gravity probably do not. InputPlumber 0.81+ handles units and axis frames itself, so re-check the matrix after an InputPlumber update.
+
 ## Files the fix pack installs
 
 | File | Purpose |

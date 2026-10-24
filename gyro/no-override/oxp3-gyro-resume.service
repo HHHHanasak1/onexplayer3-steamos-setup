@@ -1,0 +1,10 @@
+[Unit]
+Description=OXP3 gyro: re-initialise the IMU if it went silent across sleep
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+ExecStart=/etc/oxp3-gyro/oxp3-gyro-load.sh resume
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
