@@ -1,12 +1,14 @@
 #!/bin/bash
 # oxp3-steamos-fixes - ONEXPLAYER 3 (Intel Panther Lake) SteamOS fix pack
-# Version: 20261023       License: MIT (see LICENSE)     Author: HANA & Claude
+# Version: 20261027       License: MIT (see LICENSE)     Author: HANA & Claude
 # Tested on: SteamOS 3.10 main build 20260827.1000, kernel 7.2.0-valve1-1-neptune-72, OXP3 BIOS 5.09,
 #            panel Samsung SDC AMS881KB01-0, SSD Predator GM7 1TB (Biwin/Maxio 1dee:1602)
 # v1.1.0: gamescope HDR lua now also registers real 30-144Hz dynamic_modegen (this panel has genuine
 #         continuous VRR; the v1.0.1 lua declared dynamic_refresh_rates but never shipped the
 #         matching dynamic_modegen function, so no extra Hz options ever actually appeared in the
 #         Steam Performance panel's per-game refresh-rate selector).
+# 20261027: xevmafix rebuilt for kernel 7.2.7-valve2-2 (SteamOS main 20261026.1000). Same kernel source and the same
+#         machine code as before, only the version string differs, so step 15 loads again after that update.
 # 20261023: the patched InputPlumber is now part of step 5 for everyone, not only with the gyro: it also reads the
 #         controller connector (1a86:fe02, issue #23), whose Home and G-key (0x25) stock InputPlumber 0.78 ignores.
 #         The gyro step keeps only the ACPI override, its grub file, the tuning file and the IMU yaml keys; --no-gyro
@@ -78,7 +80,7 @@
 #         the hid-oxp sysfs (driver pages 1-2 only, never raw hidraw); new --mcu-restore (DANGEROUS, explicit, confirmed)
 #         rewrites MCU button-table page 3 (Home 0x24 + factory-default 0x21/0x25-0x2B) to recover a Home/Xbox
 #         key that went silent after a foreign tool overwrote the MCU table.
-OXP3_FIXES_VERSION="20261023"
+OXP3_FIXES_VERSION="20261027"
 TESTED_STEAMOS_BUILD="20260827.1000"
 TESTED_KERNEL_PREFIX="7.2.0-valve1"
 # ============================================================================
@@ -188,8 +190,8 @@ MANGO_FOR="0.8.3.rc1.r24.g33c2c7dd"                         # the SteamOS mangoh
 MANGO_SHA256="c79ca83722d0bc4dfb3f91388b2bbc012bfe8a30191df8c7996879a1a8d6645f"
 XEVMA_KO="$USER_HOME/oxp3-fix/xevmafix.ko"
 XEVMA_UNIT=/etc/systemd/system/oxp3-xevmafix.service
-XEVMA_FOR="7.2.7-valve2-1-neptune-72-g31504582a073"
-XEVMA_SHA256="b17d7bac071ded96da4f85fa6bf1bd52fa75bd0a10067fb33f7f8edd529a3599"
+XEVMA_FOR="7.2.7-valve2-2-neptune-72-g31504582a073"
+XEVMA_SHA256="dfcbc12c1499c2c263d2682e8dd0d824a9fae6948355a046a80c6b996d6a9a1d"
 DMC_NAME=i915/xe3lpd_dmc.bin                                 # the Panther Lake display controller firmware
 DMC_OVERRIDE=/usr/lib/firmware/updates/$DMC_NAME.zst         # firmware/updates takes precedence over the packaged file
 DMC_SHA256="150eaa60a776e489f69e6f334d4c12216c0d686f3a53ac2228d0a6ce48f8add9"   # v2.20 (.zst) from linux-firmware-neptune 20260910
@@ -213,7 +215,7 @@ GYRO_CONF=/etc/inputplumber/oxp3-gyro-steer.conf             # tuning, hot-reloa
 ACPI_IMG=/boot/acpi_override.img
 GRUB_IMU_FILE=/etc/default/grub.d/oxp3-imu.cfg
 GYRO_BIOS="5.09"                                             # the ACPI override is a patched copy of this BIOS's SSDT26
-PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261023/oxp3-fix.tar.gz"
+PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261027/oxp3-fix.tar.gz"
 IPF_PKG_URL="$PKG_URL"   # release archive holding the binary
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"                  # the extracted release archive, if the script came from it
 ACPI_IMG_SHA256="0e9b716e65978ac7365fda6fddf476a18b352a2d1ed98f4f30c8d3f8558b2113"

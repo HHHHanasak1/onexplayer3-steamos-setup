@@ -128,7 +128,7 @@ It asks once about the two optional parts (the gyroscope and SimpleDeckyTDP-Inte
 - **Smart CPU caps stay until a reboot** after you remove SimpleDeckyTDP-Intel.
 - **The panel fix (BIOS 5.11+) turns off panel self-refresh.** Static screens draw a bit more power (not measured). It uses xe debugfs files that a future kernel may rename. If that happens the service leaves the panel alone and says so in `journalctl -u oxp3-panel-fix`. Driver reports: [xe#8924](https://gitlab.freedesktop.org/drm/xe/kernel/-/issues/8924), [xe#9517](https://gitlab.freedesktop.org/drm/xe/kernel/-/issues/9517), [xe#8557](https://gitlab.freedesktop.org/drm/xe/kernel/-/issues/8557), [Bazzite #5975](https://github.com/ublue-os/bazzite/issues/5975).
 - **Split-lock detection is off.** The kernel no longer reports programs that use split locks. SteamOS didn't slow them down anyway (`kernel.split_lock_mitigate=0`).
-- **The sleep fix (xevmafix) only loads on the kernel it was built for** (`7.2.7-valve2-1-neptune-72`). After a SteamOS update with a new kernel it's skipped until a rebuilt module ships and big games can crash after sleep again. The real fix is in the kernel: [patch sent to intel-xe](xevmafix/README.md#upstream), [SteamOS #2962](https://github.com/ValveSoftware/SteamOS/issues/2962).
+- **The sleep fix (xevmafix) only loads on the kernel it was built for** (`7.2.7-valve2-2-neptune-72`, SteamOS main 20261026.1000). After a SteamOS update with a new kernel it's skipped until a rebuilt module ships and big games can crash after sleep again. The real fix is in the kernel: [patch sent to intel-xe](xevmafix/README.md#upstream), [SteamOS #2962](https://github.com/ValveSoftware/SteamOS/issues/2962).
 - **HDR uses the gamma-2.2 path.** A true PQ path (`xe.enable_dpcd_backlight=1`) hasn't been tested.
 - **The volume key problem is in the embedded controller firmware.** A vendor firmware update would make the forwarder unnecessary.
 
@@ -136,12 +136,13 @@ Upstream bug drafts are in `issues/`.
 
 ## Tested configuration
 
-SteamOS main 20261021.1000, kernel 7.2.7-valve2, OXP3 BIOS 5.09, panel SDC AMS881KB01-0, SSD Predator GM7 1TB. The panel fix was found and verified on BIOS 5.12. The script refuses to run on other DMI or OS values (`--force` overrides) and applies `nvme.noacpi=1` only with a GM7 / `1dee:1602` SSD (`--force-nvme` overrides). The patched InputPlumber needs the stock InputPlumber to be 0.78.x. The gyro step also needs BIOS 5.09.
+SteamOS main 20261026.1000, kernel 7.2.7-valve2-2, OXP3 BIOS 5.09, panel SDC AMS881KB01-0, SSD Predator GM7 1TB. The panel fix was found and verified on BIOS 5.12. The script refuses to run on other DMI or OS values (`--force` overrides) and applies `nvme.noacpi=1` only with a GM7 / `1dee:1602` SSD (`--force-nvme` overrides). The patched InputPlumber needs the stock InputPlumber to be 0.78.x. The gyro step also needs BIOS 5.09.
 
 ## Changelog
 
 Releases are named by date (`YYYYMMDD`) from 20261014 on.
 
+- **20261027**: xevmafix rebuilt for kernel 7.2.7-valve2-2 (SteamOS main 20261026.1000), so the sleep fix (step 15) loads again after that update. Nothing else changed.
 - **20261023**: the patched InputPlumber is installed for everyone (the gyro stays opt-in) and also reads the controller connector, so Home and the G-key work with the controllers on the dock (issue #23).
 - **20261022**: big games no longer crash with "out of memory" after waking from sleep (step 15, xevmafix, contributed by kas5852 in PR #26). Overlay: when the kernel skips the GPU energy zone at boot, step 10 now brings it back, so GPU power and the SoC total no longer go missing.
 - **20261018-2**: optional SimpleDeckyTDP-Intel (step 14, contributed by kas5852 in PR #24) with an Off / Smart / Full CPU boost. A normal run asks once. The zip comes with the release archive. An installed SimpleDeckyTDP is replaced only after you confirm.
