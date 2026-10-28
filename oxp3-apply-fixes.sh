@@ -1,12 +1,18 @@
 #!/bin/bash
 # oxp3-steamos-fixes - ONEXPLAYER 3 (Intel Panther Lake) SteamOS fix pack
-# Version: 20261027       License: MIT (see LICENSE)     Author: HANA & Claude
+# Version: 20261028       License: MIT (see LICENSE)     Author: HANA & Claude
 # Tested on: SteamOS 3.10 main build 20260827.1000, kernel 7.2.0-valve1-1-neptune-72, OXP3 BIOS 5.09,
 #            panel Samsung SDC AMS881KB01-0, SSD Predator GM7 1TB (Biwin/Maxio 1dee:1602)
 # v1.1.0: gamescope HDR lua now also registers real 30-144Hz dynamic_modegen (this panel has genuine
 #         continuous VRR; the v1.0.1 lua declared dynamic_refresh_rates but never shipped the
 #         matching dynamic_modegen function, so no extra Hz options ever actually appeared in the
 #         Steam Performance panel's per-game refresh-rate selector).
+# 20261028: true HDR. New step 16, xehdrfix: a small kernel module (release archive, sha256 pinned, kernel 7.2.7-valve2-2
+#         only) fixes the three xe problems that kept PQ (BT.2020, SMPTE ST 2084) output from working on this panel:
+#         with Panel Replay the MSA "colorimetry in VSC SDP" bit froze the panel on its stored frame, the DPCD
+#         "fixed vtotal AS SDP in PR active" bit made it show new frames at only 30 Hz, and the VSC SDP header was
+#         sometimes left with a bad ECC (black). With the module loaded the step 3 lua sends PQ, so HDR highlights reach
+#         the panel's 1100 nits; without it (other kernel) the lua keeps the gamma-2.2 path. Panel Replay stays on.
 # 20261027: xevmafix rebuilt for kernel 7.2.7-valve2-2 (SteamOS main 20261026.1000). Same kernel source and the same
 #         machine code as before, only the version string differs, so step 15 loads again after that update.
 # 20261023: the patched InputPlumber is now part of step 5 for everyone, not only with the gyro: it also reads the
@@ -80,7 +86,7 @@
 #         the hid-oxp sysfs (driver pages 1-2 only, never raw hidraw); new --mcu-restore (DANGEROUS, explicit, confirmed)
 #         rewrites MCU button-table page 3 (Home 0x24 + factory-default 0x21/0x25-0x2B) to recover a Home/Xbox
 #         key that went silent after a foreign tool overwrote the MCU table.
-OXP3_FIXES_VERSION="20261027"
+OXP3_FIXES_VERSION="20261028"
 TESTED_STEAMOS_BUILD="20260827.1000"
 TESTED_KERNEL_PREFIX="7.2.0-valve1"
 # ============================================================================
@@ -91,8 +97,8 @@ TESTED_KERNEL_PREFIX="7.2.0-valve1"
 #     0) Wi-Fi firmware - unlock the root filesystem, initialize the pacman keyring, install linux-firmware (--no-wifi skips)
 #     1) kernel param nvme.noacpi=1 (only for the Predator GM7 / 1dee:1602 SSD) - NVMe not resuming from s2idle
 #     2) xe enable_dsb=0 - silence the per-frame xe DSB error flood under gamescope
-#     3) gamescope known-display lua - HDR via the gamma2.2 path (native BT.2020/PQ output blanks the
-#        panel), plus registers the panel's real 30-144Hz continuous VRR so the Steam Performance
+#     3) gamescope known-display lua - HDR with PQ output while xehdrfix (step 16) is loaded, otherwise the gamma-2.2
+#        path (stock xe blanks or freezes the panel with PQ), plus registers the panel's real 30-144Hz continuous VRR so the Steam Performance
 #        panel's per-game refresh-rate selector actually has more than one option
 #     4) volume-key fix service - the EC drops key releases; an evdev proxy synthesises them
 #     5) InputPlumber composite device + capability map - Home/Console/Keyboard keys, back paddles as L4/R4, single virtual gamepad
@@ -121,6 +127,9 @@ TESTED_KERNEL_PREFIX="7.2.0-valve1"
 #    15) games crash with "out of memory" after waking from sleep - on resume the xe driver rebinds every GPU mapping
 #        in one array that big games push past the 4 MB kmalloc limit. A small kernel module (xevmafix/ in the repo,
 #        oxp3-xevmafix.service) lets that array fall back to vmalloc. The .ko is built for one kernel and is skipped on any other
+#    16) PQ HDR on the OLED - a small kernel module (xehdrfix/ in the repo, oxp3-xehdrfix.service, loaded before the
+#        display session) clears the MSA colorimetry bit and the DPCD fixed-vtotal AS SDP bit that break Panel Replay with
+#        PQ, and writes the VSC SDP header again when xe left a bad ECC. Built for one kernel, skipped on any other
 # Usage:
 #   ./oxp3-apply-fixes.sh                apply (asks sudo password, prints the plan and confirms)
 #   ./oxp3-apply-fixes.sh --check        check only, changes nothing, needs no sudo (covers every fix, gyro included when enabled)
@@ -192,6 +201,11 @@ XEVMA_KO="$USER_HOME/oxp3-fix/xevmafix.ko"
 XEVMA_UNIT=/etc/systemd/system/oxp3-xevmafix.service
 XEVMA_FOR="7.2.7-valve2-2-neptune-72-g31504582a073"
 XEVMA_SHA256="dfcbc12c1499c2c263d2682e8dd0d824a9fae6948355a046a80c6b996d6a9a1d"
+XEHDR_KO="$USER_HOME/oxp3-fix/xehdrfix.ko"
+XEHDR_UNIT=/etc/systemd/system/oxp3-xehdrfix.service
+XEHDR_FOR="7.2.7-valve2-2-neptune-72-g31504582a073"
+XEHDR_SHA256="14433106423f394801e383cc376eaacf197a095eec1f27a98f559db4ad740272"
+XEHDR_FLAG=/sys/module/xehdrfix/parameters/counters             # the step 3 lua sends PQ only while this exists
 DMC_NAME=i915/xe3lpd_dmc.bin                                 # the Panther Lake display controller firmware
 DMC_OVERRIDE=/usr/lib/firmware/updates/$DMC_NAME.zst         # firmware/updates takes precedence over the packaged file
 DMC_SHA256="150eaa60a776e489f69e6f334d4c12216c0d686f3a53ac2228d0a6ce48f8add9"   # v2.20 (.zst) from linux-firmware-neptune 20260910
@@ -215,7 +229,7 @@ GYRO_CONF=/etc/inputplumber/oxp3-gyro-steer.conf             # tuning, hot-reloa
 ACPI_IMG=/boot/acpi_override.img
 GRUB_IMU_FILE=/etc/default/grub.d/oxp3-imu.cfg
 GYRO_BIOS="5.09"                                             # the ACPI override is a patched copy of this BIOS's SSDT26
-PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261027/oxp3-fix.tar.gz"
+PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261028/oxp3-fix.tar.gz"
 IPF_PKG_URL="$PKG_URL"   # release archive holding the binary
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"                  # the extracted release archive, if the script came from it
 ACPI_IMG_SHA256="0e9b716e65978ac7365fda6fddf476a18b352a2d1ed98f4f30c8d3f8558b2113"
@@ -255,8 +269,10 @@ EOT
 )
 
 LUA_HDR_CONTENT=$(cat <<'EOT'
--- ONEXPLAYER 3 Samsung SDC AMS881KB01-0 OLED: treat like Steam Deck OLED / OXP F1 OLED:
--- keep the panel in its native gamma-2.2 mode and let gamescope do HDR tone-mapping internally (no BT.2020/PQ VSC SDP is sent).
+-- ONEXPLAYER 3 Samsung SDC AMS881KB01-0 OLED: content-driven HDR.
+-- With the xehdrfix module loaded (step 16) the panel gets PQ (SMPTE ST 2084, BT.2020). Stock xe blanks or freezes
+-- the panel with PQ, so without the module (e.g. after a kernel update) keep the panel in its native gamma-2.2 mode
+-- and let gamescope tone-map, like the Steam Deck OLED (no BT.2020/PQ VSC SDP is sent).
 -- This panel has real continuous VRR from 30-144Hz (confirmed by user + two real kernel-reported
 -- native modes at 60Hz and 144Hz via `modetest -c`: same pixel clock 380160kHz, same hsync/vsync
 -- width, only vertical front porch differs). Both real data points fit a simple formula exactly
@@ -264,6 +280,9 @@ LUA_HDR_CONTENT=$(cat <<'EOT'
 -- was generated from that formula rather than measured per-Hz -- verified to reproduce the two real
 -- driver-reported modes (56 @144Hz, 1904 @60Hz) exactly before being trusted for the rest of the range.
 -- Revert: delete this file and relogin game mode (HDR + extra refresh rates off). Installed by oxp3-apply-fixes.sh.
+local oxp3_xehdrfix = io and io.open and io.open("/sys/module/xehdrfix/parameters/counters", "r")
+if oxp3_xehdrfix then oxp3_xehdrfix:close() end
+local oxp3_oled_eotf = oxp3_xehdrfix and gamescope.eotf.pq or gamescope.eotf.gamma22
 local oxp3_oled_colorimetry = {   -- from EDID
     r = { x = 0.6835, y = 0.3154 },
     g = { x = 0.2402, y = 0.7138 },
@@ -321,7 +340,7 @@ gamescope.config.known_displays.oxp3_sdc_oled = {
         supported = true,
         force_enabled = true,
         content_driven = true,
-        eotf = gamescope.eotf.gamma22,
+        eotf = oxp3_oled_eotf,
         max_content_light_level = 1100,
         max_frame_average_luminance = 475,
         min_content_light_level = 0.0005,
@@ -334,7 +353,7 @@ gamescope.config.known_displays.oxp3_sdc_oled = {
         return -1
     end,
 }
-debug("oxp3: registered OXP3 SDC OLED with gamma22 HDR + 30-144Hz dynamic refresh (Deck-OLED style)")
+info("oxp3: registered OXP3 SDC OLED with " .. (oxp3_xehdrfix and "PQ" or "gamma22 (xehdrfix not loaded)") .. " HDR + 30-144Hz dynamic refresh")
 EOT
 )
 
@@ -743,6 +762,30 @@ EOT
 )
 XEVMA_UNIT_CONTENT="${XEVMA_UNIT_CONTENT//__XEVMA_KO__/$XEVMA_KO}"
 XEVMA_UNIT_CONTENT="${XEVMA_UNIT_CONTENT//__XEVMA_FOR__/$XEVMA_FOR}"
+
+# loaded before the display session: the gamescope lua (step 3) picks PQ only when the module is there, and the
+# module has to see the link training of gamescope's first modeset
+XEHDR_UNIT_CONTENT=$(cat <<'EOT'
+[Unit]
+Description=OXP3 PQ HDR on the OLED with Panel Replay (xe MSA/AS SDP/VSC SDP fixes)
+After=systemd-modules-load.service
+Before=display-manager.service sddm.service
+RequiresMountsFor=__XEHDR_KO__
+ConditionKernelVersion=__XEHDR_FOR__
+ConditionPathExists=__XEHDR_KO__
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/usr/bin/modprobe xe
+ExecStart=/bin/sh -c '[ -d /sys/module/xehdrfix ] || exec /usr/bin/insmod __XEHDR_KO__'
+
+[Install]
+WantedBy=multi-user.target
+EOT
+)
+XEHDR_UNIT_CONTENT="${XEHDR_UNIT_CONTENT//__XEHDR_KO__/$XEHDR_KO}"
+XEHDR_UNIT_CONTENT="${XEHDR_UNIT_CONTENT//__XEHDR_FOR__/$XEHDR_FOR}"
 
 # ---- TDP: MSR package PL1 follows the MMIO package PL1 (step 8) --------------------
 TDP_SH_CONTENT=$(cat <<'EOT'
@@ -1438,6 +1481,14 @@ xevma_handled() {
         echo "$n rebinds above 8 KB since boot, largest ${big:-0} entries (under the 4 MB kmalloc limit, none would have failed)"
     fi
 }
+xehdr_kernel_ok() { [ "$KVER" = "$XEHDR_FOR" ]; }
+xehdr_ko_ok() { [ -f "$XEHDR_KO" ] && [ "$(sha256sum "$XEHDR_KO" | cut -d' ' -f1)" = "$XEHDR_SHA256" ]; }
+xehdr_loaded() { [ -e "$XEHDR_FLAG" ]; }
+xehdr_handled() {
+    local msa vsc as
+    read -r msa vsc as < "$XEHDR_FLAG" 2>/dev/null || { echo "?"; return; }
+    echo "since boot: MSA bit cleared $msa, VSC header rewritten $vsc, AS SDP bit cleared ${as:-?}"
+}
 user_systemctl() { systemctl --user "$@" 2>/dev/null || true; }   # the desktop user's manager (the script runs as that user)
 have_rapl() { [ -r /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw ] && [ -r /sys/class/powercap/intel-rapl-mmio:0/constraint_0_power_limit_uw ]; }
 
@@ -1660,6 +1711,10 @@ if xe_gpu; then
     elif xevma_kernel_ok; then XEVMA_STATE="not loaded (big games can crash with \"out of memory\" after sleep)"
     else XEVMA_STATE="not available for kernel $KVER (the module is built for $XEVMA_FOR)"; fi
     say "  games after sleep (xevmafix) : $XEVMA_STATE"
+    if xehdr_loaded; then XEHDR_STATE="loaded, HDR games get PQ ($(xehdr_handled))"
+    elif xehdr_kernel_ok; then XEHDR_STATE="not loaded (HDR games use the gamma-2.2 path)"
+    else XEHDR_STATE="not available for kernel $KVER (built for $XEHDR_FOR), HDR games use the gamma-2.2 path"; fi
+    say "  PQ HDR (xehdrfix) : $XEHDR_STATE"
 fi
 if [ -n "$IPF_BLOCK" ]; then
     say "  patched InputPlumber : not used - $IPF_BLOCK"
@@ -1773,6 +1828,14 @@ if [ "$MODE" = "--check" ]; then
     elif xe_gpu; then
         say "  [info] xevmafix is built for kernel $XEVMA_FOR and this is $KVER: big games can crash after sleep until a rebuilt module ships"
     fi
+    if xe_gpu && xehdr_kernel_ok; then
+        xehdr_ko_ok || { say "  [diff] xehdrfix.ko missing or differs (apply takes it from the release archive)"; ok=0; }
+        same_content "$XEHDR_UNIT" "$XEHDR_UNIT_CONTENT" || { say "  [diff] xehdrfix unit missing or differs"; ok=0; }
+        systemctl is-enabled -q oxp3-xehdrfix.service 2>/dev/null || { say "  [diff] oxp3-xehdrfix.service not enabled"; ok=0; }
+        xehdr_loaded || { say "  [diff] xehdrfix is not loaded"; ok=0; }
+    elif xe_gpu; then
+        say "  [info] xehdrfix is built for kernel $XEHDR_FOR and this is $KVER: HDR games use the gamma-2.2 path until a rebuilt module ships"
+    fi
     if [ "$SDTDP_WANT" = 1 ] && have_decky; then
         sdtdp_installed || { say "  [diff] SimpleDeckyTDP-Intel is opted in but not installed"; ok=0; }
         [ -d "$SDTDP_UPSTREAM" ] && { say "  [diff] the original SimpleDeckyTDP is installed next to SimpleDeckyTDP-Intel; the two override each other (apply asks whether to replace it)"; ok=0; }
@@ -1872,6 +1935,8 @@ if [ "$MODE" = "--revert" ]; then
     if [ -f "$PANEL_SH" ]; then rm -f "$PANEL_SH"; say "  removed $PANEL_SH"; fi
     if [ -f "$XEVMA_UNIT" ]; then sudo systemctl disable oxp3-xevmafix.service 2>/dev/null || true; sudo rm -f "$XEVMA_UNIT"; sudo systemctl daemon-reload; say "  oxp3-xevmafix.service removed (the module stays loaded until the reboot)"; xevma_loaded && NEED_REBOOT=1; fi
     if [ -f "$XEVMA_KO" ]; then rm -f "$XEVMA_KO"; say "  removed $XEVMA_KO"; fi
+    if [ -f "$XEHDR_UNIT" ]; then sudo systemctl disable oxp3-xehdrfix.service 2>/dev/null || true; sudo rm -f "$XEHDR_UNIT"; sudo systemctl daemon-reload; say "  oxp3-xehdrfix.service removed (the module stays loaded until the reboot)"; xehdr_loaded && NEED_REBOOT=1; fi
+    if [ -f "$XEHDR_KO" ]; then rm -f "$XEHDR_KO"; say "  removed $XEHDR_KO"; fi
     if [ -f "$RAPL_UNIT" ]; then sudo systemctl disable --now oxp3-rapl-overlay.service 2>/dev/null || true; sudo rm -f "$RAPL_UNIT"; sudo systemctl daemon-reload; say "  oxp3-rapl-overlay.service stopped and removed (CPU energy counter root-only again)"; fi
     if [ -f "$RAPL_PY" ]; then rm -f "$RAPL_PY"; say "  removed $RAPL_PY"; fi
     if [ -f "$MANGO_DROPIN" ]; then sudo rm -f "$MANGO_DROPIN"; sudo rmdir "$(dirname "$MANGO_DROPIN")" 2>/dev/null || true; user_systemctl daemon-reload; say "  removed $MANGO_DROPIN (stock mangoapp from the next overlay start)"; fi
@@ -1980,6 +2045,10 @@ if ! xe_gpu; then XEVMA_NOTE="[SKIPPED: not an xe GPU]"
 elif ! xevma_kernel_ok; then XEVMA_NOTE="[SKIPPED: built for kernel $XEVMA_FOR, this is $KVER]"
 elif xevma_loaded; then XEVMA_NOTE="[loaded]"
 else XEVMA_NOTE="[from the release archive, sha256 pinned, loads right away]"; fi
+if ! xe_gpu; then XEHDR_NOTE="[SKIPPED: not an xe GPU]"
+elif ! xehdr_kernel_ok; then XEHDR_NOTE="[SKIPPED: built for kernel $XEHDR_FOR, this is $KVER; HDR stays on the gamma-2.2 path]"
+elif xehdr_loaded; then XEHDR_NOTE="[loaded]"
+else XEHDR_NOTE="[from the release archive, sha256 pinned, loads right away, PQ from the next game mode start]"; fi
 if [ "$SDTDP_REQ" = 0 ]; then
     say "  14) SimpleDeckyTDP-Intel: REMOVE $SDTDP_PLUGIN (--no-sdtdp)"
 elif [ "$SDTDP_WANT" = 1 ] && ! have_decky; then
@@ -1990,6 +2059,7 @@ else
     say "  14) SimpleDeckyTDP-Intel: not installed (a normal run asks once, or --sdtdp; see $SDTDP_README)"
 fi
 say "  15) $XEVMA_KO + $XEVMA_UNIT (games survive waking from sleep)   $XEVMA_NOTE"
+say "  16) $XEHDR_KO + $XEHDR_UNIT (PQ HDR with Panel Replay)   $XEHDR_NOTE"
 if [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then read -r -p "  Continue? (y/N) " _ans; case "$_ans" in y|Y) ;; *) say "  cancelled."; exit 0 ;; esac; fi
 sudo -v
 
@@ -2610,6 +2680,42 @@ else
                 say "  [load] xevmafix (active now, no reboot needed)"; CHANGED=1
             else
                 say "  [warn] xevmafix did not load, see: journalctl -k -b 0 | grep xevmafix"
+            fi
+        fi
+    fi
+fi
+
+if ! xe_gpu; then
+    say "  [skip] xehdrfix: not an xe GPU"
+elif ! xehdr_kernel_ok; then
+    say "  [skip] xehdrfix is built for kernel $XEHDR_FOR and this is $KVER (HDR games use the gamma-2.2 path until a rebuilt module ships)"
+else
+    XEHDR_OK=1
+    if xehdr_ko_ok; then
+        say "  [skip] $XEHDR_KO unchanged"
+    elif [ "$SCRIPT_DIR/xehdrfix.ko" != "$XEHDR_KO" ] && [ -f "$SCRIPT_DIR/xehdrfix.ko" ] && [ "$(sha256sum "$SCRIPT_DIR/xehdrfix.ko" | cut -d' ' -f1)" = "$XEHDR_SHA256" ]; then
+        mkdir -p "$(dirname "$XEHDR_KO")"; install -m 644 "$SCRIPT_DIR/xehdrfix.ko" "$XEHDR_KO"
+        say "  [write] $XEHDR_KO (from the release archive, sha256 verified)"; CHANGED=1
+    else
+        say "  [skip] xehdrfix.ko is not next to this script or its sha256 differs (it comes with the release archive)"; XEHDR_OK=0
+    fi
+    if [ "$XEHDR_OK" = 1 ]; then
+        if same_content "$XEHDR_UNIT" "$XEHDR_UNIT_CONTENT"; then
+            say "  [skip] $XEHDR_UNIT unchanged"
+        else
+            printf '%s\n' "$XEHDR_UNIT_CONTENT" | sudo tee "$XEHDR_UNIT" >/dev/null
+            sudo systemctl daemon-reload
+            say "  [write] $XEHDR_UNIT"; CHANGED=1
+        fi
+        if ! systemctl is-enabled -q oxp3-xehdrfix.service 2>/dev/null; then
+            sudo systemctl enable oxp3-xehdrfix.service >/dev/null 2>&1
+            say "  [enable] oxp3-xehdrfix.service (loads the module before game mode starts)"; CHANGED=1
+        fi
+        if ! xehdr_loaded; then
+            if sudo systemctl restart oxp3-xehdrfix.service && xehdr_loaded; then
+                say "  [load] xehdrfix (HDR games get PQ after the next game mode start or reboot)"; CHANGED=1
+            else
+                say "  [warn] xehdrfix did not load, see: journalctl -k -b 0 | grep xehdrfix (HDR stays on the gamma-2.2 path)"
             fi
         fi
     fi
