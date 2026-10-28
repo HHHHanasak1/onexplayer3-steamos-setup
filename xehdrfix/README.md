@@ -34,6 +34,10 @@ It prints the kernel the module is for and its sha256. Those two go into `XEHDR_
 
 ## Upstream
 
-Not reported yet. Once a SteamOS kernel ships fixes for these, this step can go.
+Reported to drm/xe:
+- [xe#9692](https://gitlab.freedesktop.org/drm/xe/kernel/-/work_items/9692): Panel Replay with PQ (MSA colorimetry bit, `FIXED_VTOTAL_AS_SDP_EN_IN_PR_ACTIVE`)
+- [xe#9693](https://gitlab.freedesktop.org/drm/xe/kernel/-/work_items/9693): VSC SDP dropped after some HDR modesets
+
+Once a SteamOS kernel ships fixes for these, this step can go.
 
 The module is GPL-2.0 (`MODULE_LICENSE("GPL")`), since it's a Linux kernel module.
