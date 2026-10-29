@@ -1,12 +1,16 @@
 #!/bin/bash
 # oxp3-steamos-fixes - ONEXPLAYER 3 (Intel Panther Lake) SteamOS fix pack
-# Version: 20261028       License: MIT (see LICENSE)     Author: HANA & Claude
+# Version: 20261029       License: MIT (see LICENSE)     Author: HANA & Claude
 # Tested on: SteamOS 3.10 main build 20260827.1000, kernel 7.2.0-valve1-1-neptune-72, OXP3 BIOS 5.09,
 #            panel Samsung SDC AMS881KB01-0, SSD Predator GM7 1TB (Biwin/Maxio 1dee:1602)
 # v1.1.0: gamescope HDR lua now also registers real 30-144Hz dynamic_modegen (this panel has genuine
 #         continuous VRR; the v1.0.1 lua declared dynamic_refresh_rates but never shipped the
 #         matching dynamic_modegen function, so no extra Hz options ever actually appeared in the
 #         Steam Performance panel's per-game refresh-rate selector).
+# 20261029: controller connector dock: InputPlumber also reads the connector chip's keyboard interface (HID 1a86:fe02),
+#         so the Console and Keyboard buttons work on the dock (issue #23). Step 12 also catches WirePlumber failing to
+#         enable the speaker UCM device at boot (codec not ready, hardware volume left very low) and selects the profile
+#         again.
 # 20261028: true HDR. New step 16, xehdrfix: a small kernel module (release archive, sha256 pinned, kernel 7.2.7-valve2-2
 #         only) fixes the three xe problems that kept PQ (BT.2020, SMPTE ST 2084) output from working on this panel:
 #         with Panel Replay the MSA "colorimetry in VSC SDP" bit froze the panel on its stored frame, the DPCD
@@ -86,7 +90,7 @@
 #         the hid-oxp sysfs (driver pages 1-2 only, never raw hidraw); new --mcu-restore (DANGEROUS, explicit, confirmed)
 #         rewrites MCU button-table page 3 (Home 0x24 + factory-default 0x21/0x25-0x2B) to recover a Home/Xbox
 #         key that went silent after a foreign tool overwrote the MCU table.
-OXP3_FIXES_VERSION="20261028"
+OXP3_FIXES_VERSION="20261029"
 TESTED_STEAMOS_BUILD="20260827.1000"
 TESTED_KERNEL_PREFIX="7.2.0-valve1"
 # ============================================================================
@@ -118,7 +122,8 @@ TESTED_KERNEL_PREFIX="7.2.0-valve1"
 #    11) display firmware DMC v2.20 - newer DMC releases (v2.36 in upstream linux-firmware, which SteamOS ships from
 #        20261015.1000 on) cap the frame rate at 70-80 fps with VRR; v2.20 goes into /usr/lib/firmware/updates
 #    12) speakers silent after boot or resume - the jack detection briefly reports headphones and PipeWire keeps the
-#        Headphones profile; a user unit re-selects the Speaker profile when the jack is empty (only on that mismatch)
+#        Headphones profile; a user unit re-selects the Speaker profile when the jack is empty (only on that mismatch).
+#        It also selects the profile again when WirePlumber failed to enable the UCM device (codec not ready at boot)
 #    13) OLED stays on with BIOS 5.11 and later (contributed by kas5852, PR #15) - LOBF and PSR/Panel Replay off at boot
 #        through xe debugfs (oxp3-panel-fix.service); only for the AMS881KB01 panel on BIOS 5.11+, --force-panel overrides
 #    14) [optional, asked once in a normal run] SimpleDeckyTDP-Intel (kas5852, PR #24), a SimpleDeckyTDP fork with an
@@ -229,7 +234,7 @@ GYRO_CONF=/etc/inputplumber/oxp3-gyro-steer.conf             # tuning, hot-reloa
 ACPI_IMG=/boot/acpi_override.img
 GRUB_IMU_FILE=/etc/default/grub.d/oxp3-imu.cfg
 GYRO_BIOS="5.09"                                             # the ACPI override is a patched copy of this BIOS's SSDT26
-PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261028/oxp3-fix.tar.gz"
+PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261029/oxp3-fix.tar.gz"
 IPF_PKG_URL="$PKG_URL"   # release archive holding the binary
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"                  # the extracted release archive, if the script came from it
 ACPI_IMG_SHA256="0e9b716e65978ac7365fda6fddf476a18b352a2d1ed98f4f30c8d3f8558b2113"
@@ -634,6 +639,13 @@ source_devices:
     unique: false
     evdev:
       name: "HID 1a86:fe00"
+      handler: event*
+  # With the controllers on the connector dock the Console and Keyboard combos come from the connector chip's keyboard
+  # interface instead (issue #23); without this source the raw keys go straight through (a stray "s")
+  - group: keyboard
+    unique: false
+    evdev:
+      name: "HID 1a86:fe02"
       handler: event*
   # MCU vendor interface 2: raw reports for back paddles M1/M2 (0xB2 3F 01 ... [01|02])
   - group: gamepad
@@ -1122,9 +1134,25 @@ AUDIO_SH_CONTENT=$(cat <<'EOT'
 # (user unit oxp3-audio-route.service, started by the fix pack's resume hook). It only acts on a mismatch: the ALSA
 # "Headphone Jack" control is off, but the active profile is a Headphones profile. It then selects the matching Speaker
 # profile, or restarts WirePlumber when that does not take. A plugged-in headset is never touched.
+#
+# Second case: WirePlumber starts while the codec is not ready yet and logs "Failed to enable UCM device Speaker"
+# (Input/output error). The profile is right, but the UCM enable sequence that sets the speaker volume did not run, so
+# the hardware volume stays at a very low default. When WirePlumber logged that since the last check, the active
+# profile is selected again (off, then back), which runs the sequence again.
 log() { echo "oxp3-audio-route: $*"; }
 
+# only failures from the current WirePlumber since the last check count (30 s back for the first check)
+LAST=$(( $(date +%s) - 30 ))
+ucm_failed() {
+    pid=$(systemctl --user show -p MainPID --value wireplumber.service 2>/dev/null)
+    [ -n "$pid" ] && [ "$pid" != 0 ] || return 1
+    journalctl --user -q -o cat _PID="$pid" --since "@$LAST" 2>/dev/null | grep -q 'Failed to enable UCM device'
+}
+
 check() {
+    ucm=0
+    ucm_failed && ucm=1
+    LAST=$(date +%s)
     pactl list cards 2>/dev/null | awk '
         /^Card #/ { if (name != "") print name "\t" alsa "\t" active "\t" spk; name = ""; alsa = ""; active = ""; spk = ""; inprof = 0 }
         /^\tName: / { name = $2 }
@@ -1135,7 +1163,18 @@ check() {
         /^\t[A-Z]/ && !/^\tProfiles:/ { inprof = 0 }
         END { if (name != "") print name "\t" alsa "\t" active "\t" spk }' |
     while IFS="$(printf '\t')" read -r card alsa active spk; do
-        case "$active" in *Headphones*) ;; *) continue ;; esac
+        case "$active" in
+            *Headphones*) ;;
+            off|"") continue ;;
+            *)
+                if [ "$ucm" = 1 ]; then
+                    log "WirePlumber could not enable the UCM device of $card: selecting \"$active\" again"
+                    pactl set-card-profile "$card" off
+                    sleep 1
+                    pactl set-card-profile "$card" "$active"
+                fi
+                continue ;;
+        esac
         [ -n "$spk" ] && [ -n "$alsa" ] || continue
         amixer -c "$alsa" cget iface=CARD,name='Headphone Jack' 2>/dev/null | grep -q ': values=off' || continue
         log "nothing in the headphone jack, but $card uses \"$active\": switching to \"$spk\""
