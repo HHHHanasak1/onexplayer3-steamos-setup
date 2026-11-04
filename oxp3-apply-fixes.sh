@@ -1,12 +1,27 @@
 #!/bin/bash
 # oxp3-steamos-fixes - ONEXPLAYER 3 (Intel Panther Lake) SteamOS fix pack
-# Version: 20261029       License: MIT (see LICENSE)     Author: HANA & Claude
-# Tested on: SteamOS 3.10 main build 20260827.1000, kernel 7.2.0-valve1-1-neptune-72, OXP3 BIOS 5.09,
+# Version: 20261104       License: MIT (see LICENSE)     Author: HANA & Claude
+# Tested on: SteamOS 3.10 main build 20261103.1000, kernel 7.2.7-valve2-3-neptune-72, OXP3 BIOS 5.09,
 #            panel Samsung SDC AMS881KB01-0, SSD Predator GM7 1TB (Biwin/Maxio 1dee:1602)
 # v1.1.0: gamescope HDR lua now also registers real 30-144Hz dynamic_modegen (this panel has genuine
 #         continuous VRR; the v1.0.1 lua declared dynamic_refresh_rates but never shipped the
 #         matching dynamic_modegen function, so no extra Hz options ever actually appeared in the
 #         Steam Performance panel's per-game refresh-rate selector).
+# 20261104: SteamOS main 20261103.1000: xevmafix and xehdrfix rebuilt for kernel 7.2.7-valve2-3 (same source as
+#         valve2-2, new toolchain). InputPlumber 0.83 (own OXP3 support, map oxp9): step 5 writes
+#         its config with map oxp3 (Home -> Steam menu, Keyboard -> on-screen keyboard) and the dock's fe02 keyboard;
+#         on versions other than 0.78/0.83 InputPlumber's own config is left alone. The patched InputPlumber and the gyro
+#         need 0.78 and are skipped on 0.83; a gyro set up earlier is removed there (stock 0.83 sends wrong axes).
+#         Step 12: when WirePlumber failed to enable the speaker UCM device it now restarts WirePlumber (keeping the sink
+#         volumes) instead of switching the profile off and back: when switching back failed too, the card stayed "off"
+#         and WirePlumber saved that, so the speakers stayed silent on later boots. A card left "off" with an empty
+#         headphone jack is switched back to the Speaker profile.
+#         Review fixes: everything a root service runs or loads (scripts, the patched InputPlumber, both kernel modules)
+#         now lives root-owned in /var/lib/oxp3-fix instead of the user-writable ~/oxp3-fix; step 0 downloads
+#         linux-firmware-intel through pacman (signature checked) into a root-owned cache; a read-only rootfs is made
+#         read-only again after the run; the build containers check package signatures. Fewer wakeups: the RAPL
+#         overlay refreshes every 2 s while the chip is idle, the TDP sync and battery clamp loops fork nothing and the
+#         TDP sync reads the MSR limit only when needed; the panel fix waits at most 3 s at boot (was 20 s).
 # 20261029: controller connector dock: InputPlumber also reads the connector chip's keyboard interface (HID 1a86:fe02),
 #         so the Console and Keyboard buttons work on the dock (issue #23). Step 12 also catches WirePlumber failing to
 #         enable the speaker UCM device at boot (codec not ready, hardware volume left very low) and selects the profile
@@ -90,15 +105,16 @@
 #         the hid-oxp sysfs (driver pages 1-2 only, never raw hidraw); new --mcu-restore (DANGEROUS, explicit, confirmed)
 #         rewrites MCU button-table page 3 (Home 0x24 + factory-default 0x21/0x25-0x2B) to recover a Home/Xbox
 #         key that went silent after a foreign tool overwrote the MCU table.
-OXP3_FIXES_VERSION="20261029"
-TESTED_STEAMOS_BUILD="20260827.1000"
-TESTED_KERNEL_PREFIX="7.2.0-valve1"
+OXP3_FIXES_VERSION="20261104"
+TESTED_STEAMOS_BUILD="20261103.1000"
+TESTED_KERNEL_PREFIX="7.2.7-valve2"
 # ============================================================================
 # ONEXPLAYER 3 fix re-applier  (SteamOS 3.10, Intel Panther Lake, xe)
 # Purpose:
-#   SteamOS updates may overwrite /etc changes. This script re-applies all six fixes (idempotent),
-#   preceded by step 0 which gets Wi-Fi working on a fresh install, plus the optional experimental gyro step 7:
-#     0) Wi-Fi firmware - unlock the root filesystem, initialize the pacman keyring, install linux-firmware (--no-wifi skips)
+#   SteamOS updates may overwrite /etc changes. This script re-applies every fix below (idempotent). Files that root
+#   services run or load are kept root-owned in /var/lib/oxp3-fix:
+#     0) Wi-Fi/Bluetooth firmware - extract only the missing BE201 files from linux-firmware-intel, downloaded by pacman
+#        (signature checked) and cached in /var/lib/oxp3-fix for offline re-runs (--no-wifi skips)
 #     1) kernel param nvme.noacpi=1 (only for the Predator GM7 / 1dee:1602 SSD) - NVMe not resuming from s2idle
 #     2) xe enable_dsb=0 - silence the per-frame xe DSB error flood under gamescope
 #     3) gamescope known-display lua - HDR with PQ output while xehdrfix (step 16) is loaded, otherwise the gamma-2.2
@@ -107,23 +123,27 @@ TESTED_KERNEL_PREFIX="7.2.0-valve1"
 #     4) volume-key fix service - the EC drops key releases; an evdev proxy synthesises them
 #     5) InputPlumber composite device + capability map - Home/Console/Keyboard keys, back paddles as L4/R4, single virtual gamepad
 #        (paddles rely on the in-kernel hid-oxp driver; this script only re-asserts its sysfs state, it never writes the MCU directly).
-#        InputPlumber runs as a patched 0.78.0 build (gyro/ in the repo, binary in the release archive) that also reads the
-#        controller connector (1a86:fe02) and its G-key; a launcher falls back to the stock binary if the build cannot run
+#        With InputPlumber 0.78 it runs as a patched 0.78.0 build (gyro/ in the repo, binary in the release archive) that
+#        also reads the controller connector (1a86:fe02) and its G-key; a launcher falls back to the stock binary if the
+#        build cannot run. On 0.83 step 5 writes a copy of 0.83's own OXP3 config with map oxp3 and the dock's keyboard;
+#        on other versions it leaves InputPlumber's config alone
+#        (--revert also disables inputplumber.service, as SteamOS ships it)
 #     6) battery percentage clamp service - the gauge over-reports right after a full charge (103 %); a root service
 #        overlays corrected capacity / energy_full sysfs values so Steam and the performance overlay stay at <= 100 %
-#     7) [EXPERIMENTAL, opt-in] gyroscope - ACPI override so the kernel sees the BMI260; the patched InputPlumber from step 5
-#        sends it as the Steam Deck gyro
+#     7) [EXPERIMENTAL, opt-in, InputPlumber 0.78 only] gyroscope - ACPI override so the kernel sees the BMI260; the patched
+#        InputPlumber from step 5 sends it as the Steam Deck gyro. Where the patched build cannot run the override is removed
 #     8) TDP sync service - the MSR package PL1 (obeyed by the GPU) follows the MMIO PL1 that TDP tools set
 #     9) kernel param split_lock_detect=off - stops the split-lock report flood (journal + steamos-log-submitter queue)
 #    10) CPU and GPU power/temperature in the performance overlay - a root service publishes coarse (0.5 s, 10 mJ) world-
-#        readable copies of the package and GPU (PP1) energy counters, which the kernel keeps root-only (CVE-2020-8694), and
+#        readable copies (2 s while idle) of the package and GPU (PP1) energy counters, which the kernel keeps root-only (CVE-2020-8694), and
 #        a patched mangoapp (mangoapp/ in the repo, binary in the release archive) reads GPU power from PP1 and the GPU
 #        temperature from the package sensor, because the integrated xe GPU has no hwmon device
 #    11) display firmware DMC v2.20 - newer DMC releases (v2.36 in upstream linux-firmware, which SteamOS ships from
 #        20261015.1000 on) cap the frame rate at 70-80 fps with VRR; v2.20 goes into /usr/lib/firmware/updates
 #    12) speakers silent after boot or resume - the jack detection briefly reports headphones and PipeWire keeps the
 #        Headphones profile; a user unit re-selects the Speaker profile when the jack is empty (only on that mismatch).
-#        It also selects the profile again when WirePlumber failed to enable the UCM device (codec not ready at boot)
+#        When WirePlumber failed to enable the UCM device (codec not ready at boot) it restarts WirePlumber, and a card
+#        left "off" with an empty jack gets the Speaker profile again
 #    13) OLED stays on with BIOS 5.11 and later (contributed by kas5852, PR #15) - LOBF and PSR/Panel Replay off at boot
 #        through xe debugfs (oxp3-panel-fix.service); only for the AMS881KB01 panel on BIOS 5.11+, --force-panel overrides
 #    14) [optional, asked once in a normal run] SimpleDeckyTDP-Intel (kas5852, PR #24), a SimpleDeckyTDP fork with an
@@ -142,7 +162,9 @@ TESTED_KERNEL_PREFIX="7.2.0-valve1"
 #   ./oxp3-apply-fixes.sh --mcu-restore  [DANGEROUS] raw-writes MCU button-table page 3 (Home/Xbox) to factory values, asks to confirm.
 #                                        Use ONLY if Home/Xbox are already dead. A wrong write can kill chassis keys for good and
 #                                        cannot be read back or verified. Normal users must NOT run this. No other option writes the MCU.
-#   flags: --yes no confirmation prompt | --force skip the device/OS guards | --force-nvme apply nvme.noacpi=1 on any SSD
+#   flags: --yes (-y) no confirmation prompt | --force-nvme apply nvme.noacpi=1 on any SSD
+#          --force skip the device/OS guards and the InputPlumber/BIOS version checks (also writes our InputPlumber
+#          config on any InputPlumber version)
 #          --no-wifi skip step 0 (Wi-Fi firmware) | --force-panel apply step 13 on any BIOS
 #          --sdtdp install SimpleDeckyTDP-Intel without asking (step 14) | --no-sdtdp remove it and stop asking
 #          --gyro enable the experimental gyro step (remembered; later runs and OS-update re-runs keep it)
@@ -157,7 +179,7 @@ for a in "$@"; do
         --check) MODE="--check" ;;
         --revert) MODE="--revert" ;;
         --mcu-restore) MODE="--mcu-restore" ;;  # DANGEROUS: restore MCU button page 3 (Home/Xbox)
-        --force) FORCE=1 ;;            # skip DMI + OS guards
+        --force) FORCE=1 ;;            # skip DMI + OS guards and the InputPlumber/BIOS version checks
         --force-nvme) FORCE_NVME=1 ;;  # apply nvme.noacpi=1 regardless of SSD model
         --force-panel) FORCE_PANEL=1 ;;
         --yes|-y) ASSUME_YES=1 ;;      # no confirmation prompt
@@ -177,6 +199,12 @@ else
     USER_HOME="$HOME"
 fi
 [ -n "$USER_HOME" ] || USER_HOME="$HOME"
+[ -n "$USER_HOME" ] && [ -d "$USER_HOME" ] || { echo "!! cannot find the home directory of the target user"; exit 3; }
+# everything a root service runs or loads lives in this root-owned directory: from the user's home anything running as
+# the user could swap it and get root (or a kernel module) at the next start. /var survives SteamOS updates.
+ROOT_DIR=/var/lib/oxp3-fix
+FW_CACHE="$ROOT_DIR/pkg-cache"                 # step 0: linux-firmware-intel as pacman downloaded it (signature checked)
+FW_OLD_CACHE="$USER_HOME/.cache/oxp3-fix"      # its user-writable location up to 20261029
 GRUB_D_FILE=/etc/default/grub.d/oxp3-nvme.cfg
 SPLITLOCK_FILE=/etc/default/grub.d/oxp3-splitlock.cfg
 SLS_TRACE_DIR=/var/lib/steamos-log-submitter/pending/trace
@@ -186,30 +214,30 @@ LUA_HDR="$LUA_DIR/98-oxp3-oled-hdr.lua"
 LUA_NOHDR="$LUA_DIR/99-oxp3-nohdr.lua"
 LUA_NOHDR_BAK="$USER_HOME/oxp3-nohdr.lua.disabled"
 EFI_GRUB_CFG=/efi/EFI/steamos/grub.cfg
-VOLKEY_PY="$USER_HOME/oxp3-fix/oxp3-volkey-fix.py"          # in /home, survives updates
+VOLKEY_PY="$ROOT_DIR/oxp3-volkey-fix.py"
 VOLKEY_UNIT=/etc/systemd/system/oxp3-volkey-fix.service
-BATT_SH="$USER_HOME/oxp3-fix/oxp3-battery-clamp.sh"          # in /home, survives updates
+BATT_SH="$ROOT_DIR/oxp3-battery-clamp.sh"
 BATT_UNIT=/etc/systemd/system/oxp3-battery-clamp.service
-TDP_SH="$USER_HOME/oxp3-fix/oxp3-tdp-sync.sh"                # in /home, survives updates
+TDP_SH="$ROOT_DIR/oxp3-tdp-sync.sh"
 TDP_UNIT=/etc/systemd/system/oxp3-tdp-sync.service
-PANEL_SH="$USER_HOME/oxp3-fix/oxp3-panel-fix.sh"
+PANEL_SH="$ROOT_DIR/oxp3-panel-fix.sh"
 PANEL_UNIT=/etc/systemd/system/oxp3-panel-fix.service
 PANEL_BIOS_MIN="5.11"
-RAPL_PY="$USER_HOME/oxp3-fix/oxp3-rapl-overlay.py"          # in /home, survives updates
+RAPL_PY="$ROOT_DIR/oxp3-rapl-overlay.py"
 RAPL_UNIT=/etc/systemd/system/oxp3-rapl-overlay.service
 MANGO_BIN="$USER_HOME/oxp3-fix/mangoapp-oxp3"               # patched mangoapp (source: mangoapp/ in the repo)
 MANGO_LAUNCH="$USER_HOME/oxp3-fix/oxp3-mangoapp-launch.sh"   # starts MANGO_BIN, or the stock mangoapp when it cannot run
 MANGO_DROPIN=/etc/systemd/user/gamescope-mangoapp.service.d/oxp3-mangoapp.conf
 MANGO_FOR="0.8.3.rc1.r24.g33c2c7dd"                         # the SteamOS mangohud package the patch was built from
 MANGO_SHA256="c79ca83722d0bc4dfb3f91388b2bbc012bfe8a30191df8c7996879a1a8d6645f"
-XEVMA_KO="$USER_HOME/oxp3-fix/xevmafix.ko"
+XEVMA_KO="$ROOT_DIR/xevmafix.ko"
 XEVMA_UNIT=/etc/systemd/system/oxp3-xevmafix.service
-XEVMA_FOR="7.2.7-valve2-2-neptune-72-g31504582a073"
-XEVMA_SHA256="dfcbc12c1499c2c263d2682e8dd0d824a9fae6948355a046a80c6b996d6a9a1d"
-XEHDR_KO="$USER_HOME/oxp3-fix/xehdrfix.ko"
+XEVMA_FOR="7.2.7-valve2-3-neptune-72-g31504582a073"
+XEVMA_SHA256="91133104b8773ca77d4e2b6a78838e9060a1d9b86f8851080b01499109b86251"
+XEHDR_KO="$ROOT_DIR/xehdrfix.ko"
 XEHDR_UNIT=/etc/systemd/system/oxp3-xehdrfix.service
-XEHDR_FOR="7.2.7-valve2-2-neptune-72-g31504582a073"
-XEHDR_SHA256="14433106423f394801e383cc376eaacf197a095eec1f27a98f559db4ad740272"
+XEHDR_FOR="7.2.7-valve2-3-neptune-72-g31504582a073"
+XEHDR_SHA256="a486e3ecb0b663a9b1d2d25a2e4498261944f67842bbed45672ad802ef41949d"
 XEHDR_FLAG=/sys/module/xehdrfix/parameters/counters             # the step 3 lua sends PQ only while this exists
 DMC_NAME=i915/xe3lpd_dmc.bin                                 # the Panther Lake display controller firmware
 DMC_OVERRIDE=/usr/lib/firmware/updates/$DMC_NAME.zst         # firmware/updates takes precedence over the packaged file
@@ -221,9 +249,9 @@ AUDIO_USER="$(stat -c %U "$USER_HOME" 2>/dev/null || id -un)"
 IP_YAML=/etc/inputplumber/devices.d/50-onexplayer_3.yaml
 IP_CAPMAP=/etc/inputplumber/capability_maps.d/onexplayer_type3.yaml   # id oxp3: Home key -> Guide   # InputPlumber 0.78 override dir is devices.d
 # patched InputPlumber (step 5, everyone; the file names still carry "gyro" from when only the gyro step used it)
-GYRO_DIR="$USER_HOME/oxp3-fix"                               # in /home, survives updates
-IPF_BIN="$GYRO_DIR/inputplumber-oxp3-gyro"                   # patched InputPlumber 0.78.0 (source: gyro/ in the repo)
-IPF_LAUNCH="$GYRO_DIR/oxp3-inputplumber-launch.sh"           # starts IPF_BIN, or the stock binary if IPF_BIN cannot run
+GYRO_DIR="$USER_HOME/oxp3-fix"                               # the opt-in markers below (user files)
+IPF_BIN="$ROOT_DIR/inputplumber-oxp3-gyro"                  # patched InputPlumber 0.78.0 (source: gyro/ in the repo)
+IPF_LAUNCH="$ROOT_DIR/oxp3-inputplumber-launch.sh"          # starts IPF_BIN, or the stock binary if IPF_BIN cannot run
 IPF_DROPIN=/etc/systemd/system/inputplumber.service.d/oxp3-gyro-fork.conf
 IPF_IP_SERIES="0.78"                                         # the patched build is InputPlumber 0.78.0
 IPF_BIN_SHA256="c4598b4aff064edc51a6bb2331ba5b608b2e9e11ed863c568679829ae5348966"
@@ -234,7 +262,7 @@ GYRO_CONF=/etc/inputplumber/oxp3-gyro-steer.conf             # tuning, hot-reloa
 ACPI_IMG=/boot/acpi_override.img
 GRUB_IMU_FILE=/etc/default/grub.d/oxp3-imu.cfg
 GYRO_BIOS="5.09"                                             # the ACPI override is a patched copy of this BIOS's SSDT26
-PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261029/oxp3-fix.tar.gz"
+PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261104/oxp3-fix.tar.gz"
 IPF_PKG_URL="$PKG_URL"   # release archive holding the binary
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"                  # the extracted release archive, if the script came from it
 ACPI_IMG_SHA256="0e9b716e65978ac7365fda6fddf476a18b352a2d1ed98f4f30c8d3f8558b2113"
@@ -535,12 +563,13 @@ kernel_full() { # the driver's energy_full, read from behind our own mount if it
     if mountpoint -q "$REALDIR/energy_full"; then cat "$DIR/kernel_energy_full"; else cat "$BAT/energy_full"; fi
 }
 
-compute() { # sets FULL (uWh) and PCT
-    local n f
-    n=$(cat "$BAT/energy_now"); f=$(kernel_full)
+compute() { # sets FULL (uWh) and PCT; reads with builtins, so the loop forks nothing (KF: kernel energy_full, if known)
+    local n f m=""
+    read -r n < "$BAT/energy_now"; f=${KF:-$(kernel_full)}
     [ "${f:-0}" -gt 0 ] || f=$n
-    [ -s "$DIR/max_energy_now" ] && [ "$(cat "$DIR/max_energy_now")" -gt "$n" ] 2>/dev/null && n_max=$(cat "$DIR/max_energy_now") || n_max=$n
-    echo "$n_max" > "$DIR/max_energy_now"
+    [ -s "$DIR/max_energy_now" ] && read -r m < "$DIR/max_energy_now"
+    if [ "${m:-0}" -gt "$n" ] 2>/dev/null; then n_max=$m; else n_max=$n; fi
+    [ "$n_max" = "$m" ] || echo "$n_max" > "$DIR/max_energy_now"
     FULL=$f; [ "$n_max" -gt "$FULL" ] && FULL=$n_max
     PCT=$(( (n * 100 + FULL / 2) / FULL ))
     [ "$PCT" -gt 100 ] && PCT=100
@@ -573,6 +602,8 @@ compute
 for a in capacity energy_full; do
     mountpoint -q "$REALDIR/$a" || mount --bind "$DIR/$a" "$REALDIR/$a" || exit 1
 done
+read -r KF < "$DIR/kernel_energy_full"   # the driver's value is behind our mount now and does not change
+exec 3<> <(:)                            # read -t on this never-ready fd is the sleep, without a fork per tick
 last=""
 while :; do
     compute
@@ -581,7 +612,7 @@ while :; do
         write_fixed "$DIR/energy_full" 9 "$FULL"
         last="$PCT/$FULL"
     fi
-    sleep "$INTERVAL"
+    read -rt "$INTERVAL" -u 3 _ || true
 done
 EOT
 )
@@ -811,7 +842,9 @@ TDP_SH_CONTENT=$(cat <<'EOT'
 # "pl1" and ~33 W package power. Copying the MMIO PL1 into the MSR PL1 made the GPU run at 2300 MHz, unthrottled.
 #
 # This root service checks every 2 s and copies the MMIO PL1 into the MSR PL1 whenever they differ, so whatever sets
-# the TDP (a plugin, the firmware on AC/DC changes, a manual write) also sets the limit the GPU obeys. Only PL1 is
+# the TDP (a plugin, the firmware on AC/DC changes, a manual write) also sets the limit the GPU obeys. The loop forks
+# nothing; the MSR limit (each read is a cross-CPU MSR access) is only read when the MMIO value changed or every 30 s
+# (the firmware may reset it on resume), and a value the MSR zone clamps is not written again and again. Only PL1 is
 # touched; the MSR PL2 stays at its firmware value. On stop the MSR PL1 found at the first start is written back
 # (a reboot restores the firmware value anyway). Options: --once prints both limits and exits, --stop restores.
 MSR=/sys/class/powercap/intel-rapl:0
@@ -830,19 +863,27 @@ case "${1:-}" in
 esac
 mkdir -p "$DIR"
 [ -s "$DIR/msr_pl1_orig" ] || cat "$MSR/constraint_0_power_limit_uw" > "$DIR/msr_pl1_orig"
-last=""
+exec 3<> <(:)                      # read -t on this never-ready fd is the sleep, without a fork per tick
+seen=""; done_for=""; got=""; n=0
 while :; do
-    want=$(cat "$MMIO/constraint_0_power_limit_uw" 2>/dev/null)
-    have=$(cat "$MSR/constraint_0_power_limit_uw" 2>/dev/null)
-    if [ "${want:-0}" -gt 0 ] && [ "$want" != "$have" ]; then
-        if echo "$want" > "$MSR/constraint_0_power_limit_uw" 2>/dev/null; then
-            [ "$want" != "$last" ] && echo "MSR PL1 $(w "$have") -> $(w "$want") (follows MMIO PL1)"
-            last=$want
-        elif [ "$want" != "$last" ]; then
-            echo "writing MSR PL1 = $(w "$want") failed"; last=$want
+    read -r want < "$MMIO/constraint_0_power_limit_uw" 2>/dev/null || want=0
+    n=$((n + 1))
+    if [ "${want:-0}" -gt 0 ] && { [ "$want" != "$seen" ] || [ $((n % 15)) = 0 ]; }; then
+        read -r have < "$MSR/constraint_0_power_limit_uw" 2>/dev/null || have=""
+        # write when they differ, unless this MMIO value was already written and the MSR zone kept it at what it has
+        if [ "$want" != "$have" ] && ! { [ "$want" = "$done_for" ] && [ "$have" = "$got" ]; }; then
+            if echo "$want" > "$MSR/constraint_0_power_limit_uw" 2>/dev/null; then
+                read -r got < "$MSR/constraint_0_power_limit_uw" 2>/dev/null || got=""
+                if [ "$got" = "$want" ]; then echo "MSR PL1 $(w "$have") -> $(w "$want") (follows MMIO PL1)"
+                else echo "MSR PL1 $(w "$want") requested, the MSR zone keeps $(w "${got:-0}")"; fi
+            elif [ "$want" != "$done_for" ]; then
+                echo "writing MSR PL1 = $(w "$want") failed"; got=$have
+            fi
+            done_for=$want
         fi
+        seen=$want
     fi
-    sleep "$INTERVAL"
+    read -rt "$INTERVAL" -u 3 _ || true
 done
 EOT
 )
@@ -869,7 +910,9 @@ TDP_UNIT_CONTENT="${TDP_UNIT_CONTENT//__TDP_SH__/$TDP_SH}"
 
 PANEL_SH_CONTENT=$(cat <<'EOT'
 #!/bin/bash
-for _ in $(seq 1 100); do
+# the unit loads xe first (modprobe returns once the driver probed), so the entries are normally there at once; the
+# short wait covers a late eDP connector without holding the display session back for long when they never appear
+for _ in $(seq 1 15); do
     for d in /sys/kernel/debug/dri/*/; do
         [ -e "${d}eDP-1/i915_edp_lobf_debug" ] && [ -e "${d}i915_edp_psr_debug" ] && break 2
     done
@@ -890,6 +933,7 @@ RequiresMountsFor=__PANEL_SH__
 
 [Service]
 Type=oneshot
+ExecStartPre=-/usr/bin/modprobe xe
 ExecStart=/bin/bash __PANEL_SH__
 RemainAfterExit=yes
 
@@ -911,7 +955,9 @@ RAPL_PY_CONTENT=$(cat <<'EOT'
 #
 # Fix: a root service opens the real counters once, then bind-mounts world-readable copies over the attributes and
 # refreshes them twice a second, rounded down to 10 mJ. That is plenty for a power reading over the overlay's 500 ms
-# window, and useless for the side channel, which needs thousands of samples per second. Covered zones:
+# window, and useless for the side channel, which needs thousands of samples per second. While the chip draws little
+# (menus, screen off, idle desktop) the copies are refreshed every 2 s instead: each refresh is a cross-CPU MSR read,
+# and a light load is also when a lower reading rate costs the overlay nothing. Covered zones:
 #   intel-rapl:0    package-0  whole-chip power (read by stock MangoHud as CPU power; includes the GPU)
 #   intel-rapl:0:0  core       RAPL PP0, the CPU cores (read by the patched mangoapp as CPU power)
 #   intel-rapl:0:1  uncore     RAPL PP1, the graphics power plane (read by the patched mangoapp for the integrated GPU)
@@ -930,7 +976,10 @@ import time
 BASE = "/sys/class/powercap"
 ZONES = [("intel-rapl:0", "package-0"), ("intel-rapl:0:0", "core"), ("intel-rapl:0:1", "uncore")]
 RUNDIR = "/run/oxp3-rapl"
-PERIOD = 0.5         # s between refreshes
+PERIOD = 0.5         # s between refreshes under load
+IDLE_PERIOD = 2.0    # s between refreshes while the package draws less than BUSY_W
+BUSY_W = 6.0         # package power that counts as load (idle and menus stay below)
+PP1_WAIT = 300       # s to wait for the GPU energy counter before giving up on the PP1 zone
 QUANTUM = 10000      # uJ (10 mJ) resolution of the copies
 WIDTH = 20           # fixed width, so every refresh is one same-length in-place write
 
@@ -1050,21 +1099,33 @@ if RELOADED:
         print("still no PP1 (uncore) zone after the reload: the overlay shows no GPU power on this boot")
         sys.stdout.flush()
 
-ticks = 0
+period = PERIOD
+start = last_t = next_pp1 = time.monotonic()
 while True:
-    time.sleep(PERIOD)
+    time.sleep(period)
+    t = time.monotonic()
+    pkg = 0
     for z in zones:
         now = read_real(z)
-        z["total"] += now - z["last"] if now >= z["last"] else now + z["wrap"] - z["last"]
+        d = now - z["last"] if now >= z["last"] else now + z["wrap"] - z["last"]
+        z["total"] += d
         z["last"] = now
         publish(z)
-    ticks += 1
-    if need_pp1 and ticks % 4 == 0:
+        if z is zones[0]:
+            pkg = d                         # zones[0] is the package
+    period = PERIOD if pkg / 1e6 / max(t - last_t, 1e-3) >= BUSY_W else IDLE_PERIOD
+    last_t = t
+    if need_pp1 and t >= next_pp1:
+        next_pp1 = t + 2
         try:
             if pp1_counter():
                 reload_rapl_msr()
         except OSError:
             need_pp1 = False                # no msr device: keep running without PP1
+        if need_pp1 and t - start > PP1_WAIT:
+            print("the GPU energy counter did not start: the overlay shows no GPU power on this boot")
+            sys.stdout.flush()
+            need_pp1 = False
 EOT
 )
 
@@ -1097,7 +1158,7 @@ MANGO_LAUNCH_CONTENT=$(cat <<'EOT'
 # depends on this build.
 B=__MANGO_BIN__
 STOCK=/usr/bin/mangoapp
-LOG="${XDG_RUNTIME_DIR:-/tmp}/oxp3-mangoapp.starts"
+LOG="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/oxp3-mangoapp.starts"   # never a shared /tmp file
 now=$(date +%s)
 recent=$(awk -v n="$now" '$1 > n - 60' "$LOG" 2>/dev/null | wc -l)
 echo "$now" >> "$LOG"
@@ -1137,8 +1198,14 @@ AUDIO_SH_CONTENT=$(cat <<'EOT'
 #
 # Second case: WirePlumber starts while the codec is not ready yet and logs "Failed to enable UCM device Speaker"
 # (Input/output error). The profile is right, but the UCM enable sequence that sets the speaker volume did not run, so
-# the hardware volume stays at a very low default. When WirePlumber logged that since the last check, the active
-# profile is selected again (off, then back), which runs the sequence again.
+# the hardware volume stays at a very low default. When WirePlumber logged that since the last check, WirePlumber is
+# restarted, which sets the card up again and runs the sequence; the volume and mute the sinks had are put back
+# afterwards. If the codec is still not ready the next check sees the new failure and tries again. (Up to 20261029 the
+# profile was switched off and back instead: when switching back failed too the card stayed "off", and WirePlumber
+# saved that as the user's choice, so the speakers stayed silent on every later boot.)
+#
+# Third case: the card's profile is "off" while nothing is in the headphone jack, as that left it. The Speaker profile
+# is selected again.
 log() { echo "oxp3-audio-route: $*"; }
 
 # only failures from the current WirePlumber since the last check count (30 s back for the first check)
@@ -1165,13 +1232,33 @@ check() {
     while IFS="$(printf '\t')" read -r card alsa active spk; do
         case "$active" in
             *Headphones*) ;;
-            off|"") continue ;;
+            "") continue ;;
+            off)
+                [ -n "$spk" ] && [ -n "$alsa" ] || continue
+                amixer -c "$alsa" cget iface=CARD,name='Headphone Jack' 2>/dev/null | grep -q ': values=off' || continue
+                log "$card is switched off with nothing in the headphone jack: selecting \"$spk\""
+                pactl set-card-profile "$card" "$spk"
+                continue ;;
             *)
                 if [ "$ucm" = 1 ]; then
-                    log "WirePlumber could not enable the UCM device of $card: selecting \"$active\" again"
-                    pactl set-card-profile "$card" off
-                    sleep 1
-                    pactl set-card-profile "$card" "$active"
+                    log "WirePlumber could not enable the UCM device of $card: restarting WirePlumber"
+                    prefix="alsa_output.${card#alsa_card.}."
+                    saved=$(pactl list sinks short 2>/dev/null | awk -v p="$prefix" 'index($2, p) == 1 { print $2 }' |
+                        while read -r s; do
+                            printf '%s %s %s\n' "$s" "$(pactl get-sink-volume "$s" | awk '/Volume:/ { print $5; exit }')" \
+                                "$(pactl get-sink-mute "$s" | awk '{ print ($2 == "yes") }')"
+                        done)
+                    systemctl --user restart wireplumber.service
+                    # put back the volume and mute once the sinks are there again
+                    i=0
+                    while [ $i -lt 20 ] && ! pactl list sinks short 2>/dev/null | awk -v p="$prefix" 'index($2, p) == 1 { f = 1 } END { exit !f }'; do
+                        sleep 0.5; i=$((i + 1))
+                    done
+                    printf '%s\n' "$saved" | while read -r s vol mute; do
+                        [ -n "$vol" ] || continue
+                        pactl set-sink-volume "$s" "$vol" 2>/dev/null
+                        pactl set-sink-mute "$s" "$mute" 2>/dev/null
+                    done
                 fi
                 continue ;;
         esac
@@ -1283,6 +1370,110 @@ accel_gain=2.0
 smooth_hz=8
 invert=0
 upright_min=0.6
+EOT
+)
+
+# InputPlumber 0.83 has its own ONEXPLAYER 3 config (its OXP HID driver reads Home and the paddles from the vendor
+# interface, map oxp9). This is that config with two changes: the connector dock's keyboard interface as a source
+# (issue #23) and our map oxp3 below. The USB port pins stay: without them the second fe00 keyboard interface forms
+# a second virtual controller. The IMU entry is the stock one; the gyro is not set up on 0.83 (see step 7).
+IP_YAML_083_CONTENT=$(cat <<'EOT'
+# OXP3 fix pack (InputPlumber 0.83): the stock ONEXPLAYER 3 config plus the connector dock keys and map oxp3
+version: 1
+kind: CompositeDevice
+name: ONEXPLAYER 3
+single_source: false
+matches:
+  - dmi_data:
+      product_name: ONEXPLAYER 3
+      sys_vendor: ONE-NETBOOK
+source_devices:
+  - group: gamepad
+    evdev:
+      name: Microsoft X-Box 360 pad
+      phys_path: usb-0000:00:14.0-7/input0
+      handler: event*
+  - group: keyboard
+    evdev:
+      name: HID 1a86:fe00
+      phys_path: usb-0000:00:14.0-5/input0
+      handler: event*
+    events:
+      exclude:
+        - "*"
+      include:
+        - Keyboard:KeyLeftAlt
+        - Keyboard:KeyLeftCtrl
+        - Keyboard:KeyLeftMeta
+        - Keyboard:KeyO
+  # with the controllers on the connector dock the Console and Keyboard combos come from the connector chip (issue #23)
+  - group: keyboard
+    evdev:
+      name: HID 1a86:fe02
+      handler: event*
+    events:
+      exclude:
+        - "*"
+      include:
+        - Keyboard:KeyLeftAlt
+        - Keyboard:KeyLeftCtrl
+        - Keyboard:KeyLeftMeta
+        - Keyboard:KeyO
+  - group: gamepad
+    hidraw:
+      vendor_id: 0x1a86
+      product_id: 0xfe00
+      interface_num: 2
+  - group: imu
+    iio:
+      name: bmi260
+      mount_matrix:
+        x: [0, 1, 0]
+        y: [1, 0, 0]
+        z: [0, 0, 1]
+options:
+  auto_manage: true
+target_devices:
+  - xbox-elite
+  - mouse
+  - keyboard
+capability_map_id: oxp3   # oxp9 + Home -> Steam menu, Keyboard key -> on-screen keyboard (capability_maps.d/onexplayer_type3.yaml)
+EOT
+)
+
+# the stock map oxp9 sends Home as the gamepad Keyboard button and the Keyboard key as a screenshot; this keeps the
+# behaviour of the 0.78 setup: Home -> Steam menu, Keyboard key -> on-screen keyboard, Console -> Quick Access
+IP_CAPMAP_083_CONTENT=$(cat <<'EOT'
+# OXP3 fix pack (InputPlumber 0.83): the stock map oxp9 plus Home -> Steam menu and the Keyboard key -> on-screen keyboard
+version: 1
+kind: CapabilityMap
+name: OneXPlayer 3 (fix pack, InputPlumber 0.83)
+id: oxp3
+mapping:
+  - name: Home key (vendor button 0x24, reported as Keyboard) -> Steam menu
+    source_events:
+      - gamepad:
+          button: Keyboard
+    target_event:
+      gamepad:
+        button: Guide
+  - name: Console key (Ctrl+Alt+Meta) -> Quick Access Menu
+    source_events:
+      - keyboard: KeyLeftCtrl
+      - keyboard: KeyLeftAlt
+      - keyboard: KeyLeftMeta
+    target_event:
+      gamepad:
+        button: QuickAccess
+  - name: Keyboard key (Ctrl+Meta+O) -> on-screen keyboard
+    source_events:
+      - keyboard: KeyLeftCtrl
+      - keyboard: KeyLeftMeta
+      - keyboard: KeyO
+    target_event:
+      gamepad:
+        button: Keyboard
+filtered_events: []
 EOT
 )
 
@@ -1497,7 +1688,11 @@ same_content() { # same_content <file> <content>  -> 0 if identical
 CHANGED=0; NEED_REBOOT=0; NEED_RELOGIN=0; VOLKEY_RESTART=0; IP_RESTART=0; BATT_RESTART=0; TDP_RESTART=0; RAPL_RESTART=0; PANEL_RESTART=0
 have_rapl_pkg() { [ -e /sys/class/powercap/intel-rapl:0/energy_uj ]; }
 # the running kernel loads the xe3lpd DMC (Panther Lake display); the line also names the loaded version
-dmc_loaded() { journalctl -k -b 0 --no-pager 2>/dev/null | sed -n "s|.*Finished loading DMC firmware $DMC_NAME (\(v[0-9.]*\)).*|\1|p" | tail -n1; }
+# the kernel log of this boot, read once (it is scanned several times below)
+KLOG="$(journalctl -k -b 0 --no-pager 2>/dev/null)"
+klog() { printf '%s
+' "$KLOG"; }
+dmc_loaded() { klog | sed -n "s|.*Finished loading DMC firmware $DMC_NAME (\(v[0-9.]*\)).*|\1|p" | tail -n1; }
 dmc_system_sha() { sha256sum /usr/lib/firmware/$DMC_NAME.zst 2>/dev/null | cut -d' ' -f1; }
 dmc_override_ok() { [ "$(sha256sum "$DMC_OVERRIDE" 2>/dev/null | cut -d' ' -f1)" = "$DMC_SHA256" ]; }
 # only on machines that use this firmware at all
@@ -1597,6 +1792,13 @@ ipf_block_reason() {
     case "$IP_VER" in "$IPF_IP_SERIES".*) ;; *) echo "InputPlumber is '${IP_VER:-?}', the patched build is for the $IPF_IP_SERIES series (--force overrides)"; return 0 ;; esac
 }
 IPF_BLOCK="$(ipf_block_reason)"
+# our device config and capability map exist for the InputPlumber 0.78 and 0.83 series; on any other version
+# InputPlumber's own ONEXPLAYER 3 config is used, since ours could override a newer one
+IP_083_SERIES="0.83"
+ip_config_applies() { [ "$FORCE" = 1 ] || case "$IP_VER" in "$IPF_IP_SERIES".*|"$IP_083_SERIES".*) true ;; *) false ;; esac; }
+case "$IP_VER" in
+    "$IP_083_SERIES".*) IP_YAML_CONTENT="$IP_YAML_083_CONTENT"; IP_YAML_CONTENT_BASE="$IP_YAML_083_CONTENT"; IP_CAPMAP_CONTENT="$IP_CAPMAP_083_CONTENT" ;;
+esac
 # prints why the gyro step cannot be used here (nothing when it can); it needs the patched InputPlumber
 gyro_block_reason() {
     if [ -n "$IPF_BLOCK" ]; then echo "$IPF_BLOCK"; return 0; fi
@@ -1613,8 +1815,20 @@ if [ "$GYRO_WANT" = 1 ] && [ -z "$GYRO_BLOCK" ]; then GYRO_ON=1; set_gyro_yaml; 
 ipf_bin_ok() { [ -f "$IPF_BIN" ] && [ "$(sha256sum "$IPF_BIN" | cut -d' ' -f1)" = "$IPF_BIN_SHA256" ]; }
 ipf_installed() { [ -f "$IPF_DROPIN" ] || [ -f "$IPF_LAUNCH" ] || [ -f "$IPF_BIN" ]; }
 acpi_img_sha() { sha256sum "$ACPI_IMG" 2>/dev/null | cut -d' ' -f1 || true; }
+# the gyro's files without the opt-in marker: what still makes the kernel expose the IMU
+gyro_files_present() { [ -f "$GYRO_CONF" ] || [ -f "$GRUB_IMU_FILE" ]     || [ "$(acpi_img_sha)" = "$ACPI_IMG_SHA256" ] || [ "$(acpi_img_sha)" = "$ACPI_IMG_OLD_SHA256" ]; }
 gyro_installed() { [ -f "$GYRO_CONF" ] || [ -f "$GRUB_IMU_FILE" ] || [ -f "$GYRO_ON_FILE" ] \
     || [ "$(acpi_img_sha)" = "$ACPI_IMG_SHA256" ] || [ "$(acpi_img_sha)" = "$ACPI_IMG_OLD_SHA256" ]; }
+root_put_exec() { # root_put_exec <file> <content>: write an executable owned by root (ROOT_DIR) when it differs
+    if same_content "$1" "$2"; then say "  [skip] $1 unchanged"; return 1; fi
+    printf '%s
+' "$2" | sudo install -D -o root -g root -m 755 /dev/stdin "$1"; say "  [write] $1"; return 0
+}
+root_install() { # root_install <source> <file> <mode>: copy into ROOT_DIR, owned by root
+    sudo install -D -o root -g root -m "$3" "$1" "$2"
+}
+# up to 20261029 these were written to ~/oxp3-fix (user-owned) and run from there by root services
+OLD_USER_COPIES="oxp3-volkey-fix.py oxp3-battery-clamp.sh oxp3-tdp-sync.sh oxp3-panel-fix.sh oxp3-rapl-overlay.py oxp3-inputplumber-launch.sh"
 sudo_put() { # sudo_put <file> <content>: write as root when it differs; returns 1 when unchanged
     if same_content "$1" "$2"; then say "  [skip] $1 unchanged"; return 1; fi
     sudo mkdir -p "$(dirname "$1")"; printf '%s\n' "$2" | sudo tee "$1" >/dev/null; say "  [write] $1"; return 0
@@ -1625,7 +1839,7 @@ remove_ipf() {
         sudo rm -f "$IPF_DROPIN"; sudo rmdir "$(dirname "$IPF_DROPIN")" 2>/dev/null || true; sudo systemctl daemon-reload
         say "  [remove] $IPF_DROPIN (InputPlumber is the stock binary again)"; IP_RESTART=1; CHANGED=1
     fi
-    for _f in "$IPF_LAUNCH" "$IPF_BIN" "$IPF_BIN.part"; do [ -f "$_f" ] && { rm -f "$_f"; say "  [remove] $_f"; }; done
+    for _f in "$IPF_LAUNCH" "$IPF_BIN"; do [ -f "$_f" ] && { sudo rm -f "$_f"; say "  [remove] $_f"; }; done
     return 0
 }
 # take every gyro file away again (the grub reference goes before the image, so the boot menu never points at a missing file)
@@ -1643,7 +1857,8 @@ remove_gyro() {
     fi
     return 0
 }
-have_decky() { [ -d "$DECKY_PLUGINS" ] && systemctl cat plugin_loader.service >/dev/null 2>&1; }
+# root unzips into and deletes inside the plugin directory: it must be a real directory in the user's home, not a symlink
+have_decky() { [ -d "$DECKY_PLUGINS" ] && [ ! -L "$DECKY_PLUGINS" ] && [ ! -L "$USER_HOME/homebrew" ]     && systemctl cat plugin_loader.service >/dev/null 2>&1; }
 sdtdp_installed() { [ -f "$SDTDP_PLUGIN/plugin.json" ]; }
 sdtdp_version() { sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' "$SDTDP_PLUGIN/package.json" 2>/dev/null | head -n1; }
 SDTDP_WANT=0
@@ -1774,6 +1989,7 @@ else
 fi
 RO_STATUS="$(steamos-readonly status 2>/dev/null | head -n1 || true)"   # note: exits non-zero when disabled
 [ -n "$RO_STATUS" ] || RO_STATUS=unknown
+RO_INITIAL="$RO_STATUS"   # a read-only rootfs is made read-only again once the run is done
 say "  steamos-readonly : $RO_STATUS"
 if sdtdp_installed; then
     say "  SimpleDeckyTDP-Intel : $(sdtdp_version)$([ -d "$SDTDP_UPSTREAM" ] && echo ", the original SimpleDeckyTDP is installed too")"
@@ -1789,9 +2005,9 @@ for _d in /sys/bus/pci/devices/*; do
     if [ "$(cat "$_d/class" 2>/dev/null)" = "0x028000" ] && [ "$(cat "$_d/vendor" 2>/dev/null)" = "0x8086" ]; then IWL_DEV="$(basename "$_d")"; break; fi
 done
 WL_IF="$(ls -d /sys/class/net/*/wireless 2>/dev/null | head -n1 | cut -d/ -f5 || true)"
-IWL_FAMILY="$(journalctl -k -b 0 --no-pager 2>/dev/null | sed -n 's/.*minimum version required: \(iwlwifi-[^ ]*\)-c\{0,1\}[0-9]*$/\1/p' | tail -n1)"
-[ -n "$IWL_FAMILY" ] || IWL_FAMILY="$(journalctl -k -b 0 --no-pager 2>/dev/null | sed -n 's/.*Direct firmware load for \(iwlwifi-[^ ]*\)-c\{0,1\}[0-9]*\.ucode failed.*/\1/p' | tail -n1)"
-BT_FAMILY="$(journalctl -k -b 0 --no-pager 2>/dev/null | sed -n 's/.*Failed to load Intel firmware file intel\/\(ibt-[0-9a-f]*-[0-9a-f]*\)-.*/\1/p' | tail -n1)"
+IWL_FAMILY="$(klog | sed -n 's/.*minimum version required: \(iwlwifi-[^ ]*\)-c\{0,1\}[0-9]*$/\1/p' | tail -n1)"
+[ -n "$IWL_FAMILY" ] || IWL_FAMILY="$(klog | sed -n 's/.*Direct firmware load for \(iwlwifi-[^ ]*\)-c\{0,1\}[0-9]*\.ucode failed.*/\1/p' | tail -n1)"
+BT_FAMILY="$(klog | sed -n 's/.*Failed to load Intel firmware file intel\/\(ibt-[0-9a-f]*-[0-9a-f]*\)-.*/\1/p' | tail -n1)"
 WIFI_MISSING=0; BT_MISSING=0
 [ -n "$IWL_DEV" ] && [ -z "$WL_IF" ] && WIFI_MISSING=1
 [ -n "$BT_FAMILY" ] && ! ls /usr/lib/firmware/intel/"$BT_FAMILY"-* >/dev/null 2>&1 && BT_MISSING=1
@@ -1879,8 +2095,13 @@ if [ "$MODE" = "--check" ]; then
         sdtdp_installed || { say "  [diff] SimpleDeckyTDP-Intel is opted in but not installed"; ok=0; }
         [ -d "$SDTDP_UPSTREAM" ] && { say "  [diff] the original SimpleDeckyTDP is installed next to SimpleDeckyTDP-Intel; the two override each other (apply asks whether to replace it)"; ok=0; }
     fi
-    same_content "$IP_YAML" "$IP_YAML_CONTENT" || { say "  [diff] IP yaml missing or differs"; ok=0; }
-    same_content "$IP_CAPMAP" "$IP_CAPMAP_CONTENT" || { say "  [diff] IP capability map missing or differs"; ok=0; }
+    if ip_config_applies; then
+        same_content "$IP_YAML" "$IP_YAML_CONTENT" || { say "  [diff] IP yaml missing or differs"; ok=0; }
+        same_content "$IP_CAPMAP" "$IP_CAPMAP_CONTENT" || { say "  [diff] IP capability map missing or differs"; ok=0; }
+    else
+        say "  [info] InputPlumber is '${IP_VER:-?}': its own ONEXPLAYER 3 config is used, ours is for the $IPF_IP_SERIES and $IP_083_SERIES series"
+        { [ -f "$IP_YAML" ] || [ -f "$IP_CAPMAP" ]; } && { say "  [diff] our InputPlumber config is still in /etc/inputplumber (apply removes it)"; ok=0; }
+    fi
     systemctl is-enabled -q inputplumber.service 2>/dev/null || { say "  [diff] inputplumber.service not enabled"; ok=0; }
     if [ -z "$IPF_BLOCK" ]; then
         ipf_bin_ok || { say "  [diff] patched InputPlumber missing or differs (apply downloads it)"; ok=0; }
@@ -1888,6 +2109,7 @@ if [ "$MODE" = "--check" ]; then
         same_content "$IPF_DROPIN" "$IPF_DROPIN_CONTENT" || { say "  [diff] InputPlumber systemd drop-in missing or differs"; ok=0; }
     else
         say "  [info] the patched InputPlumber cannot be used here: $IPF_BLOCK"
+        [ -f "$IPF_DROPIN" ] && { say "  [diff] the InputPlumber drop-in for the patched build is still installed (apply removes it)"; ok=0; }
     fi
     if [ "$GYRO_ON" = 1 ]; then
         [ -f "$GYRO_CONF" ] || { say "  [diff] $GYRO_CONF missing"; ok=0; }
@@ -1896,6 +2118,7 @@ if [ "$MODE" = "--check" ]; then
         [ "$IMU_ACTIVE" = 1 ] || { say "  [diff] the IMU is not visible to the running kernel (ACPI override not loaded)"; ok=0; }
     elif [ "$GYRO_WANT" = 1 ]; then
         say "  [info] gyro is wanted but cannot be used here: $GYRO_BLOCK"
+        [ -n "$IPF_BLOCK" ] && gyro_files_present && { say "  [diff] the gyro's ACPI override is still installed; the stock InputPlumber reads it with wrong axes (apply removes it)"; ok=0; }
     fi
     if [ -z "$OXP_DEV" ]; then say "  [diff] hid-oxp not bound, paddles will be silent"; ok=0;
     elif ! paddles_ok; then say "  [diff] paddle driver state differs (apply re-asserts via sysfs)"; ok=0; fi
@@ -1954,6 +2177,8 @@ fi
 if [ "$MODE" = "--revert" ]; then
     hdr "Reverting all fixes"
     sudo -v
+    # the DMC override and the firmware cache are outside /etc
+    [ "$RO_STATUS" = "enabled" ] && sudo steamos-readonly disable
     if [ -f "$GRUB_D_FILE" ]; then sudo rm -f "$GRUB_D_FILE"; say "  removed $GRUB_D_FILE"; sudo update-grub; NEED_REBOOT=1; fi
     if [ -f "$SPLITLOCK_FILE" ]; then sudo rm -f "$SPLITLOCK_FILE"; say "  removed $SPLITLOCK_FILE"; sudo update-grub; NEED_REBOOT=1; fi
     if [ -f "$MODPROBE_FILE" ]; then sudo rm -f "$MODPROBE_FILE"; say "  removed $MODPROBE_FILE"; NEED_REBOOT=1; fi
@@ -1965,19 +2190,19 @@ if [ "$MODE" = "--revert" ]; then
     if [ -f "$IP_CAPMAP" ]; then sudo rm -f "$IP_CAPMAP"; say "  removed $IP_CAPMAP"; fi
     if [ -f "$IP_YAML" ]; then sudo systemctl disable --now inputplumber.service 2>/dev/null || true; sudo rm -f "$IP_YAML"; say "  InputPlumber disabled and OXP3 config removed (gamepad back to plain xpad)"; fi
     if [ -f "$VOLKEY_UNIT" ]; then sudo systemctl disable --now oxp3-volkey-fix.service 2>/dev/null || true; sudo rm -f "$VOLKEY_UNIT"; sudo systemctl daemon-reload; say "  oxp3-volkey-fix.service stopped and removed (volume keys back to raw EC behavior)"; fi
-    if [ -f "$VOLKEY_PY" ]; then rm -f "$VOLKEY_PY"; say "  removed $VOLKEY_PY"; fi
+    if [ -f "$VOLKEY_PY" ]; then sudo rm -f "$VOLKEY_PY"; say "  removed $VOLKEY_PY"; fi
     if [ -f "$BATT_UNIT" ]; then sudo systemctl disable --now oxp3-battery-clamp.service 2>/dev/null || true; sudo rm -f "$BATT_UNIT"; sudo systemctl daemon-reload; say "  oxp3-battery-clamp.service stopped and removed (raw kernel battery values again)"; fi
-    if [ -f "$BATT_SH" ]; then rm -f "$BATT_SH"; say "  removed $BATT_SH"; fi
+    if [ -f "$BATT_SH" ]; then sudo rm -f "$BATT_SH"; say "  removed $BATT_SH"; fi
     if [ -f "$TDP_UNIT" ]; then sudo systemctl disable --now oxp3-tdp-sync.service 2>/dev/null || true; sudo rm -f "$TDP_UNIT"; sudo systemctl daemon-reload; say "  oxp3-tdp-sync.service stopped and removed (MSR PL1 back to the firmware value)"; fi
-    if [ -f "$TDP_SH" ]; then rm -f "$TDP_SH"; say "  removed $TDP_SH"; fi
+    if [ -f "$TDP_SH" ]; then sudo rm -f "$TDP_SH"; say "  removed $TDP_SH"; fi
     if [ -f "$PANEL_UNIT" ]; then sudo systemctl disable oxp3-panel-fix.service 2>/dev/null || true; sudo rm -f "$PANEL_UNIT"; sudo systemctl daemon-reload; say "  oxp3-panel-fix.service removed (the driver's PSR and LOBF return after the reboot)"; NEED_REBOOT=1; fi
-    if [ -f "$PANEL_SH" ]; then rm -f "$PANEL_SH"; say "  removed $PANEL_SH"; fi
+    if [ -f "$PANEL_SH" ]; then sudo rm -f "$PANEL_SH"; say "  removed $PANEL_SH"; fi
     if [ -f "$XEVMA_UNIT" ]; then sudo systemctl disable oxp3-xevmafix.service 2>/dev/null || true; sudo rm -f "$XEVMA_UNIT"; sudo systemctl daemon-reload; say "  oxp3-xevmafix.service removed (the module stays loaded until the reboot)"; xevma_loaded && NEED_REBOOT=1; fi
-    if [ -f "$XEVMA_KO" ]; then rm -f "$XEVMA_KO"; say "  removed $XEVMA_KO"; fi
+    if [ -f "$XEVMA_KO" ]; then sudo rm -f "$XEVMA_KO"; say "  removed $XEVMA_KO"; fi
     if [ -f "$XEHDR_UNIT" ]; then sudo systemctl disable oxp3-xehdrfix.service 2>/dev/null || true; sudo rm -f "$XEHDR_UNIT"; sudo systemctl daemon-reload; say "  oxp3-xehdrfix.service removed (the module stays loaded until the reboot)"; xehdr_loaded && NEED_REBOOT=1; fi
-    if [ -f "$XEHDR_KO" ]; then rm -f "$XEHDR_KO"; say "  removed $XEHDR_KO"; fi
+    if [ -f "$XEHDR_KO" ]; then sudo rm -f "$XEHDR_KO"; say "  removed $XEHDR_KO"; fi
     if [ -f "$RAPL_UNIT" ]; then sudo systemctl disable --now oxp3-rapl-overlay.service 2>/dev/null || true; sudo rm -f "$RAPL_UNIT"; sudo systemctl daemon-reload; say "  oxp3-rapl-overlay.service stopped and removed (CPU energy counter root-only again)"; fi
-    if [ -f "$RAPL_PY" ]; then rm -f "$RAPL_PY"; say "  removed $RAPL_PY"; fi
+    if [ -f "$RAPL_PY" ]; then sudo rm -f "$RAPL_PY"; say "  removed $RAPL_PY"; fi
     if [ -f "$MANGO_DROPIN" ]; then sudo rm -f "$MANGO_DROPIN"; sudo rmdir "$(dirname "$MANGO_DROPIN")" 2>/dev/null || true; user_systemctl daemon-reload; say "  removed $MANGO_DROPIN (stock mangoapp from the next overlay start)"; fi
     for _f in "$MANGO_LAUNCH" "$MANGO_BIN"; do [ -f "$_f" ] && { rm -f "$_f"; say "  removed $_f"; }; done
     if [ -f "$DMC_OVERRIDE" ]; then sudo rm -f "$DMC_OVERRIDE"; say "  removed $DMC_OVERRIDE (the packaged DMC loads after the reboot)"; NEED_REBOOT=1; fi
@@ -1986,7 +2211,11 @@ if [ "$MODE" = "--revert" ]; then
     if [ -f "$AUDIO_SH" ]; then rm -f "$AUDIO_SH"; say "  removed $AUDIO_SH"; fi
     if [ -f "$LUA_HDR" ]; then mv -f "$LUA_HDR" "$USER_HOME/oxp3-oled-hdr.lua.disabled"; say "  HDR lua moved to $USER_HOME/oxp3-oled-hdr.lua.disabled"; NEED_RELOGIN=1; fi
     if [ -f "$LUA_NOHDR_BAK" ] && [ ! -f "$LUA_NOHDR" ]; then mkdir -p "$LUA_DIR"; cp -f "$LUA_NOHDR_BAK" "$LUA_NOHDR"; say "  nohdr lua restored (prevents a black screen when HDR is on)"; NEED_RELOGIN=1; fi
-    say "revert done. (The Wi-Fi firmware step is not undone: linux-firmware stays installed.)"
+    for _f in $OLD_USER_COPIES; do rm -f "$USER_HOME/oxp3-fix/$_f"; done
+    sudo rm -rf "$FW_CACHE"; rm -rf "$FW_OLD_CACHE"
+    sudo rmdir "$ROOT_DIR" 2>/dev/null || true
+    [ "$RO_INITIAL" = "enabled" ] && sudo steamos-readonly enable
+    say "revert done. (The Wi-Fi firmware step is not undone: the extracted firmware files stay in /usr/lib/firmware.)"
     if [ $NEED_REBOOT = 1 ]; then say "reboot required for the kernel parameter change to take effect."; elif [ $NEED_RELOGIN = 1 ]; then say "re-enter game mode to reload the lua."; fi
     exit 0
 fi
@@ -2053,7 +2282,7 @@ say "   1) $GRUB_D_FILE (nvme.noacpi=1) + update-grub   $(nvme_bug_present && ec
 say "   2) $MODPROBE_FILE (xe enable_dsb=0)"
 say "   3) $LUA_HDR (gamescope HDR lua) and remove 99-oxp3-nohdr.lua"
 say "   4) $VOLKEY_PY + $VOLKEY_UNIT (volume-key fix)   $(have_evdev && echo "[python3-evdev OK]" || echo "[SKIPPED: python3 evdev missing]")"
-say "   5) $IP_YAML + $IP_CAPMAP + enable inputplumber   $(have_ip && echo "[inputplumber OK]" || echo "[SKIPPED: inputplumber missing]")"
+say "   5) $IP_YAML + $IP_CAPMAP + enable inputplumber   $(! have_ip && echo "[SKIPPED: inputplumber missing]" || { ip_config_applies && echo "[inputplumber OK]" || echo "[InputPlumber $IP_VER: its own OXP3 config is used, only enable]"; })"
 if [ -n "$IPF_BLOCK" ]; then
     say "      + patched InputPlumber: [SKIPPED: $IPF_BLOCK]"
 else
@@ -2108,9 +2337,11 @@ sudo -v
 # extract only the missing families into /usr/lib/firmware; existing files are never overwritten and no package is
 # replaced. Needs a writable rootfs and some network connection (USB Ethernet / USB tethering while Wi-Fi is down).
 WIFI_FAILED=0
-# the package is cached in /home, which survives OS updates, so after an update Wi-Fi can be restored without any network
-FW_CACHE="$USER_HOME/.cache/oxp3-fix"
+# pacman downloads the package and checks its signature; it is cached root-owned in /var, which survives OS updates, so
+# after an update Wi-Fi can be restored without any network. (Up to 20261029 the cache was the user-writable
+# ~/.cache/oxp3-fix, which root then trusted; that copy is removed.)
 FW_CACHED="$(ls -t "$FW_CACHE"/linux-firmware-intel-*.pkg.tar.zst 2>/dev/null | head -n1 || true)"
+
 HAVE_NET=0; ip route 2>/dev/null | grep -q '^default' && HAVE_NET=1
 if [ "$SKIP_WIFI" = 1 ]; then
     say "  [skip] Wi-Fi firmware step disabled (--no-wifi)"
@@ -2143,11 +2374,11 @@ else
     if [ -z "$FW_URL" ]; then
         say "  [error] linux-firmware-intel not found in the configured repositories"; WIFI_FAILED=1
     else
-        mkdir -p "$FW_CACHE"
         FW_PKG="$FW_CACHE/$(basename "$FW_URL")"
         if [ ! -s "$FW_PKG" ]; then
-            say "  [run] downloading $(basename "$FW_URL") (about 130 MB) ..."
-            curl -fL --retry 3 --progress-bar -o "$FW_PKG.part" "$FW_URL" && mv "$FW_PKG.part" "$FW_PKG" || { rm -f "$FW_PKG.part"; say "  [error] download failed"; WIFI_FAILED=1; }
+            say "  [run] pacman -Sw linux-firmware-intel (about 130 MB, signature checked by pacman) ..."
+            sudo mkdir -p "$FW_CACHE"
+            sudo pacman -Sw --noconfirm --cachedir "$FW_CACHE" linux-firmware-intel || { say "  [error] download or signature check failed"; WIFI_FAILED=1; }
         else
             say "  [skip] using cached $(basename "$FW_PKG")"
         fi
@@ -2194,6 +2425,7 @@ else
         fi
     fi
 fi
+if [ -d "$FW_OLD_CACHE" ]; then rm -rf "$FW_OLD_CACHE"; say "  [remove] $FW_OLD_CACHE (old user-writable package cache)"; fi
 # re-read xe param now that sudo is available
 XE_DSB="$(sudo cat /sys/module/xe/parameters/enable_dsb 2>/dev/null || echo '?')"
 say "  xe enable_dsb (running, via sudo) : $XE_DSB"
@@ -2291,13 +2523,7 @@ fi
 if ! have_evdev; then
     say "  [skip] python3 evdev module missing, skipping volume-key fix"
 else
-mkdir -p "$(dirname "$VOLKEY_PY")"
-if same_content "$VOLKEY_PY" "$VOLKEY_PY_CONTENT"; then
-    say "  [skip] $VOLKEY_PY unchanged"
-else
-    printf '%s\n' "$VOLKEY_PY_CONTENT" > "$VOLKEY_PY"; chmod +x "$VOLKEY_PY"
-    say "  [write] $VOLKEY_PY"; CHANGED=1; VOLKEY_RESTART=1
-fi
+if root_put_exec "$VOLKEY_PY" "$VOLKEY_PY_CONTENT"; then CHANGED=1; VOLKEY_RESTART=1; fi
 if same_content "$VOLKEY_UNIT" "$VOLKEY_UNIT_CONTENT"; then
     say "  [skip] $VOLKEY_UNIT unchanged"
 else
@@ -2324,15 +2550,17 @@ mkdir -p "$GYRO_DIR"
 IPF_OK=0
 if [ -n "$IPF_BLOCK" ]; then
     say "  [skip] patched InputPlumber: $IPF_BLOCK; the stock binary runs"
+    # the drop-in only adds the launcher, which would start the stock binary anyway: back to the plain service
+    if ipf_installed; then remove_ipf; fi
 else
     IPF_OK=1
     # keep the verified copy, else take it from the release archive next to the script, else download the archive and
     # extract it; the sha256 is checked every time
     if ipf_bin_ok; then
         say "  [skip] $IPF_BIN unchanged"
-    elif [ "$SCRIPT_DIR/inputplumber-oxp3-gyro" != "$IPF_BIN" ] && [ -f "$SCRIPT_DIR/inputplumber-oxp3-gyro" ] \
+    elif [ -f "$SCRIPT_DIR/inputplumber-oxp3-gyro" ] \
         && [ "$(sha256sum "$SCRIPT_DIR/inputplumber-oxp3-gyro" | cut -d' ' -f1)" = "$IPF_BIN_SHA256" ]; then
-        install -m 755 "$SCRIPT_DIR/inputplumber-oxp3-gyro" "$IPF_BIN"; say "  [write] $IPF_BIN (from the release archive, sha256 verified)"; CHANGED=1; IP_RESTART=1
+        root_install "$SCRIPT_DIR/inputplumber-oxp3-gyro" "$IPF_BIN" 755; say "  [write] $IPF_BIN (from the release archive, sha256 verified)"; CHANGED=1; IP_RESTART=1
     elif ! command -v curl >/dev/null 2>&1 || ! ip route 2>/dev/null | grep -q '^default'; then
         say "  [error] the patched InputPlumber is not on this machine and there is no network to download it"; IPF_OK=0
     else
@@ -2341,7 +2569,7 @@ else
         if curl -fL --retry 3 --progress-bar -o "$_tmp/pkg.tar.gz" "$IPF_PKG_URL" \
             && tar -xzf "$_tmp/pkg.tar.gz" -C "$_tmp" oxp3-fix/inputplumber-oxp3-gyro \
             && [ "$(sha256sum "$_tmp/oxp3-fix/inputplumber-oxp3-gyro" | cut -d' ' -f1)" = "$IPF_BIN_SHA256" ]; then
-            install -m 755 "$_tmp/oxp3-fix/inputplumber-oxp3-gyro" "$IPF_BIN"; say "  [write] $IPF_BIN (sha256 verified)"; CHANGED=1; IP_RESTART=1
+            root_install "$_tmp/oxp3-fix/inputplumber-oxp3-gyro" "$IPF_BIN" 755; say "  [write] $IPF_BIN (sha256 verified)"; CHANGED=1; IP_RESTART=1
         else
             say "  [error] download failed or the sha256 of the patched InputPlumber does not match"; IPF_OK=0
         fi
@@ -2351,9 +2579,7 @@ else
         say "  [error] the patched InputPlumber needs libraries this SteamOS build does not have:"; ldd "$IPF_BIN" 2>&1 | grep 'not found'; IPF_OK=0
     fi
     if [ "$IPF_OK" = 1 ]; then
-        printf '%s\n' "$IPF_LAUNCH_CONTENT" > "$IPF_LAUNCH.new"; chmod +x "$IPF_LAUNCH.new"
-        if [ -f "$IPF_LAUNCH" ] && cmp -s "$IPF_LAUNCH.new" "$IPF_LAUNCH"; then rm -f "$IPF_LAUNCH.new"; say "  [skip] $IPF_LAUNCH unchanged"
-        else mv -f "$IPF_LAUNCH.new" "$IPF_LAUNCH"; say "  [write] $IPF_LAUNCH"; CHANGED=1; IP_RESTART=1; fi
+        if root_put_exec "$IPF_LAUNCH" "$IPF_LAUNCH_CONTENT"; then CHANGED=1; IP_RESTART=1; fi
         if sudo_put "$IPF_DROPIN" "$IPF_DROPIN_CONTENT"; then sudo systemctl daemon-reload; CHANGED=1; IP_RESTART=1; fi
         say "  patched InputPlumber in place (controller connector support; the gyro step builds on it)"
     else
@@ -2367,6 +2593,11 @@ if [ "$GYRO_REQ" = 0 ]; then
     rm -f "$GYRO_ON_FILE"; : > "$GYRO_OFF_FILE"
 elif [ "$GYRO_WANT" = 1 ] && [ -n "$GYRO_BLOCK" ]; then
     say "  [skip] gyro (experimental): $GYRO_BLOCK"
+    if [ -n "$IPF_BLOCK" ] && gyro_files_present; then
+        # without the patched InputPlumber the stock one reads the sensor with wrong axes (0.83): take the sensor away
+        # again; the opt-in stays, so the gyro comes back when the patched build can run
+        say "  [gyro] the stock InputPlumber would send the gyro with wrong axes, removing the ACPI override"; remove_gyro
+    fi
 elif [ "$GYRO_ON" = 1 ]; then
     GYRO_OK="$IPF_OK"
     # ACPI override image (never replace an acpi_override.img that is not ours)
@@ -2412,6 +2643,18 @@ fi
 # e3. InputPlumber: Home/Console/Keyboard keys + back paddles (L4/R4) + single virtual gamepad
 if ! have_ip; then
     say "  [skip] inputplumber not installed, skipping gamepad integration"
+elif ! ip_config_applies; then
+    say "  [skip] InputPlumber is '${IP_VER:-?}', which has its own ONEXPLAYER 3 config; ours is for the $IPF_IP_SERIES and $IP_083_SERIES series"
+    for f in "$IP_YAML" "$IP_CAPMAP"; do
+        if [ -f "$f" ]; then sudo rm -f "$f"; say "  [remove] $f (would override InputPlumber's own config)"; CHANGED=1; IP_RESTART=1; fi
+    done
+    if ! systemctl is-enabled -q inputplumber.service 2>/dev/null; then
+        sudo systemctl enable inputplumber.service >/dev/null 2>&1
+        say "  [enable] inputplumber.service"; CHANGED=1; IP_RESTART=1
+    fi
+    if [ "${IP_RESTART:-0}" = 1 ] || ! systemctl is-active -q inputplumber.service 2>/dev/null; then
+        sudo systemctl restart inputplumber.service && say "  [restart] inputplumber.service (the gamepad re-enumerates briefly)"
+    fi
 else
 if same_content "$IP_YAML" "$IP_YAML_CONTENT"; then
     say "  [skip] $IP_YAML unchanged"
@@ -2456,13 +2699,7 @@ fi
 if [ ! -r /sys/class/power_supply/BAT0/energy_now ]; then
     say "  [skip] no BAT0 with energy_* attributes, skipping battery clamp"
 else
-mkdir -p "$(dirname "$BATT_SH")"
-if same_content "$BATT_SH" "$BATT_SH_CONTENT"; then
-    say "  [skip] $BATT_SH unchanged"
-else
-    printf '%s\n' "$BATT_SH_CONTENT" > "$BATT_SH"; chmod +x "$BATT_SH"
-    say "  [write] $BATT_SH"; CHANGED=1; BATT_RESTART=1
-fi
+if root_put_exec "$BATT_SH" "$BATT_SH_CONTENT"; then CHANGED=1; BATT_RESTART=1; fi
 if same_content "$BATT_UNIT" "$BATT_UNIT_CONTENT"; then
     say "  [skip] $BATT_UNIT unchanged"
 else
@@ -2483,14 +2720,7 @@ fi
 if ! have_rapl; then
     say "  [skip] no MSR/MMIO package RAPL, skipping TDP sync"
 else
-mkdir -p "$(dirname "$TDP_SH")"
-if same_content "$TDP_SH" "$TDP_SH_CONTENT"; then
-    say "  [skip] $TDP_SH unchanged"
-else
-    printf '%s
-' "$TDP_SH_CONTENT" > "$TDP_SH"; chmod +x "$TDP_SH"
-    say "  [write] $TDP_SH"; CHANGED=1; TDP_RESTART=1
-fi
+if root_put_exec "$TDP_SH" "$TDP_SH_CONTENT"; then CHANGED=1; TDP_RESTART=1; fi
 if same_content "$TDP_UNIT" "$TDP_UNIT_CONTENT"; then
     say "  [skip] $TDP_UNIT unchanged"
 else
@@ -2513,13 +2743,7 @@ fi
 if ! have_rapl_pkg; then
     say "  [skip] no intel-rapl:0 package zone, skipping the CPU power overlay"
 else
-mkdir -p "$(dirname "$RAPL_PY")"
-if same_content "$RAPL_PY" "$RAPL_PY_CONTENT"; then
-    say "  [skip] $RAPL_PY unchanged"
-else
-    printf '%s\n' "$RAPL_PY_CONTENT" > "$RAPL_PY"; chmod +x "$RAPL_PY"
-    say "  [write] $RAPL_PY"; CHANGED=1; RAPL_RESTART=1
-fi
+if root_put_exec "$RAPL_PY" "$RAPL_PY_CONTENT"; then CHANGED=1; RAPL_RESTART=1; fi
 if same_content "$RAPL_UNIT" "$RAPL_UNIT_CONTENT"; then
     say "  [skip] $RAPL_UNIT unchanged"
 else
@@ -2632,13 +2856,7 @@ fi
 if ! panel_fix_needed; then
     say "  [skip] the panel fix needs the AMS881KB01 panel on BIOS $PANEL_BIOS_MIN or later (BIOS ${BIOS_VER:-?}), keeping the driver's PSR and LOBF (force with --force-panel)"
 else
-mkdir -p "$(dirname "$PANEL_SH")"
-if same_content "$PANEL_SH" "$PANEL_SH_CONTENT"; then
-    say "  [skip] $PANEL_SH unchanged"
-else
-    printf '%s\n' "$PANEL_SH_CONTENT" > "$PANEL_SH"; chmod +x "$PANEL_SH"
-    say "  [write] $PANEL_SH"; CHANGED=1; PANEL_RESTART=1
-fi
+if root_put_exec "$PANEL_SH" "$PANEL_SH_CONTENT"; then CHANGED=1; PANEL_RESTART=1; fi
 if same_content "$PANEL_UNIT" "$PANEL_UNIT_CONTENT"; then
     say "  [skip] $PANEL_UNIT unchanged"
 else
@@ -2696,8 +2914,8 @@ else
     XEVMA_OK=1
     if xevma_ko_ok; then
         say "  [skip] $XEVMA_KO unchanged"
-    elif [ "$SCRIPT_DIR/xevmafix.ko" != "$XEVMA_KO" ] && [ -f "$SCRIPT_DIR/xevmafix.ko" ] && [ "$(sha256sum "$SCRIPT_DIR/xevmafix.ko" | cut -d' ' -f1)" = "$XEVMA_SHA256" ]; then
-        mkdir -p "$(dirname "$XEVMA_KO")"; install -m 644 "$SCRIPT_DIR/xevmafix.ko" "$XEVMA_KO"
+    elif [ -f "$SCRIPT_DIR/xevmafix.ko" ] && [ "$(sha256sum "$SCRIPT_DIR/xevmafix.ko" | cut -d' ' -f1)" = "$XEVMA_SHA256" ]; then
+        root_install "$SCRIPT_DIR/xevmafix.ko" "$XEVMA_KO" 644
         say "  [write] $XEVMA_KO (from the release archive, sha256 verified)"; CHANGED=1
     else
         say "  [skip] xevmafix.ko is not next to this script or its sha256 differs (it comes with the release archive)"; XEVMA_OK=0
@@ -2732,8 +2950,8 @@ else
     XEHDR_OK=1
     if xehdr_ko_ok; then
         say "  [skip] $XEHDR_KO unchanged"
-    elif [ "$SCRIPT_DIR/xehdrfix.ko" != "$XEHDR_KO" ] && [ -f "$SCRIPT_DIR/xehdrfix.ko" ] && [ "$(sha256sum "$SCRIPT_DIR/xehdrfix.ko" | cut -d' ' -f1)" = "$XEHDR_SHA256" ]; then
-        mkdir -p "$(dirname "$XEHDR_KO")"; install -m 644 "$SCRIPT_DIR/xehdrfix.ko" "$XEHDR_KO"
+    elif [ -f "$SCRIPT_DIR/xehdrfix.ko" ] && [ "$(sha256sum "$SCRIPT_DIR/xehdrfix.ko" | cut -d' ' -f1)" = "$XEHDR_SHA256" ]; then
+        root_install "$SCRIPT_DIR/xehdrfix.ko" "$XEHDR_KO" 644
         say "  [write] $XEHDR_KO (from the release archive, sha256 verified)"; CHANGED=1
     else
         say "  [skip] xehdrfix.ko is not next to this script or its sha256 differs (it comes with the release archive)"; XEHDR_OK=0
@@ -2760,7 +2978,18 @@ else
     fi
 fi
 
+# copies that root services used to run from ~/oxp3-fix: gone once no unit points at them any more
+for _f in $OLD_USER_COPIES; do
+    [ -f "$USER_HOME/oxp3-fix/$_f" ] || continue
+    if ! grep -rqsF "$USER_HOME/oxp3-fix/$_f" /etc/systemd/system/; then
+        rm -f "$USER_HOME/oxp3-fix/$_f"; say "  [remove] $USER_HOME/oxp3-fix/$_f (no root service runs it from there any more)"; CHANGED=1
+    fi
+done
+
 # f. summary
+if [ "$RO_INITIAL" = "enabled" ] && [ "$(steamos-readonly status 2>/dev/null | head -n1)" = "disabled" ]; then
+    sudo steamos-readonly enable && say "  [run] rootfs read-only again, as it was before this run"
+fi
 hdr "Summary"
 if [ "$WIFI_FAILED" = 1 ]; then say "  Wi-Fi/Bluetooth firmware step did not complete, see the messages above."; fi
 if [ $CHANGED = 1 ]; then say "  changes were made."; else say "  nothing to change, all fixes in place."; fi

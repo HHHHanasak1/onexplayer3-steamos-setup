@@ -2,6 +2,8 @@
 
 Opt-in step 7 of the fix pack (`./oxp3-apply-fixes.sh --gyro`). This directory holds the sources behind it.
 
+**InputPlumber 0.83 (SteamOS main 20261103.1000 and later):** neither the patched build nor the gyro step is used, both need stock InputPlumber 0.78.x. Stock 0.83 reads the sensor itself but sends it with the wrong axes on this device, so the fix pack removes a gyro set up earlier (the ACPI override) and keeps your opt-in. Everything below describes the 0.78 setup.
+
 Since release 20261023 the patched InputPlumber is installed for everyone as part of step 5, because it also adds the controller connector (`1a86:fe02`, issue #23). The gyro step itself is the ACPI override and the IMU settings; without it the patched build simply sees no sensor.
 
 **Status: experimental.** The gyro works and Steam's gyro layouts (gyro to joystick, camera, flick stick) accept it, but the sensor has a temperature-dependent bias about the vertical axis that gravity cannot correct, so drift is *reduced*, not eliminated. The gyro is not enabled unless you ask for it, and `--no-gyro` removes it again.

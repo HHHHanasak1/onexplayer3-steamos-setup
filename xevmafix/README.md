@@ -43,7 +43,7 @@ The `.ko` only loads on the exact kernel it was built for. `build.sh` builds it 
 mkdir -p ~/xevmafix-build && cp xevmafix.c Makefile ~/xevmafix-build/ && ./build.sh
 ```
 
-It prints the kernel the module is for and its sha256. Those two go into `XEVMA_FOR` and `XEVMA_SHA256` in the script and the `.ko` goes into the release archive. A rebuild of the shipped 7.2.7 module gives the same machine code as the tested one.
+It prints the kernel the module is for and its sha256. Those two go into `XEVMA_FOR` and `XEVMA_SHA256` in the script and the `.ko` goes into the release archive. A rebuild of the shipped 7.2.7 module gives the same machine code as the tested one (checked for valve2-2). For valve2-3, the same kernel source built with a new toolchain, the byte check below passed and the module handled rebinds over the 4 MB limit on the device.
 
 If a new kernel changes those two functions, the byte check refuses to load and the offsets in `xevmafix.c` need a look.
 

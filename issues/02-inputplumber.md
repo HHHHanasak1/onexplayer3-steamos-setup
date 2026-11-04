@@ -1,5 +1,7 @@
 # InputPlumber 0.78: ONEXPLAYER 3 support - Home key (btn 0x24) mapping, QuickAccess2 leaves R1 latched on deck-uhid
 
+**Status (2026-11-04):** InputPlumber 0.83 adds its own ONEXPLAYER 3 support (map oxp9). It still sends Home as the gamepad Keyboard button (on-screen keyboard) and the Keyboard key as a screenshot, and its gyro has wrong axes on this device.
+
 **Device:** ONE-NETBOOK ONEXPLAYER 3 (DMI product_name "ONEXPLAYER 3"). xpad 045e:028e (bcdDevice 3.15, single vendor interface) + MCU 1a86:fe00 fw 1.55 (kbd iface 0, mouse iface 1, vendor iface 2 usage page 0xFF00, 64-byte in/out).
 **Working config (attached):** `50-onexplayer_3.yaml` = apex template with DMI match "ONEXPLAYER 3"; sources: xpad evdev + `HID 1a86:fe00` keyboard evdev + hidraw 1a86:fe00 iface 2 (+ iio placeholder); capability map oxp8 -> Console key (Ctrl+Alt+Meta) -> QuickAccess and Keyboard key (Ctrl+Meta+O) -> Keyboard work as intended.
 

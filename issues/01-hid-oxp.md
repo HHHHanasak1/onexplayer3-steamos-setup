@@ -1,5 +1,7 @@
 # hid-oxp: NULL pointer dereference in oxp_rgb_status_store() on driver rebind; LED sysfs is a no-op on ONEXPLAYER 3 (MCU 1a86:fe00 fw 1.55)
 
+**Status (2026-11-04):** the LED part is fixed in kernel 7.2.7 (SteamOS 20261013.1000): hid-oxp now drives the three light zones. The rebind Oops was not re-tested.
+
 **Target:** Valve linux-neptune kernel 7.2.0-valve1-1-neptune-72 (`drivers/hid/hid-oxp.c`, author Derek J. Clark) / SteamOS 3.10 main 20260827.1000
 **Device:** ONE-NETBOOK ONEXPLAYER 3 (Panther Lake, BIOS 5.09). MCU USB 1a86:fe00 bcdDevice 1.55, 3 HID interfaces (kbd, mouse, 64-byte vendor page 0xFF00). Gamepad enumerates separately as 045e:028e (xpad).
 

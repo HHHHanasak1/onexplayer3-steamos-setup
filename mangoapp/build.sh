@@ -1,12 +1,12 @@
 #!/bin/bash
 # Build mangoapp (MangoHud 33c2c7dd + Valve cherry-picks + OXP3 iGPU patch) against the SteamOS package set, so the
 # binary links the same library versions as the device. Log: ~/mh-build/build.log
-exec podman run --rm -v /home/deck/mh-build:/w -v /etc/pacman.d/mirrorlist:/etc/pacman.d/mirrorlist.steamos:ro -w /w docker.io/library/archlinux:latest bash -c "
+exec podman run --rm -v /home/deck/mh-build:/w -v /etc/pacman.d/mirrorlist:/etc/pacman.d/mirrorlist.steamos:ro -v /usr/share/pacman/keyrings:/usr/share/pacman/keyrings.steamos:ro -w /w docker.io/library/archlinux:latest bash -c "
 set -e
 cat > /etc/pacman.conf <<P
 [options]
 Architecture = auto
-SigLevel = Never
+SigLevel = Required DatabaseOptional
 ParallelDownloads = 10
 [jupiter-main]
 Include = /etc/pacman.d/mirrorlist.steamos
@@ -17,6 +17,9 @@ Include = /etc/pacman.d/mirrorlist.steamos
 [extra-main]
 Include = /etc/pacman.d/mirrorlist.steamos
 P
+# packages are signature-checked: the container trusts the Arch keys it ships plus the deck's Valve (holo) keys
+cp /usr/share/pacman/keyrings.steamos/holo* /usr/share/pacman/keyrings/
+pacman-key --init >/dev/null 2>&1 && pacman-key --populate archlinux holo >/dev/null 2>&1
 pacman -Syyuu --noconfirm >/w/pacman.log 2>&1
 pacman -S --noconfirm --needed base-devel git meson glslang glew glfw-x11 libglvnd libx11 libxrandr libxkbcommon python python-mako dbus unzip wayland >>/w/pacman.log 2>&1
 pacman -Q glibc gcc >>/w/pacman.log
