@@ -8,3 +8,5 @@
 gyro/*.patch -text
 *.dsl text eol=lf
 *.patch -text
+*.yml text eol=lf
+ci/holo-keyring/* -text

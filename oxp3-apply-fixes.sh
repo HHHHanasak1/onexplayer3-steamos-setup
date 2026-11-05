@@ -151,10 +151,10 @@ TESTED_KERNEL_PREFIX="7.2.7-valve2"
 #        is only done after the user confirms it
 #    15) games crash with "out of memory" after waking from sleep - on resume the xe driver rebinds every GPU mapping
 #        in one array that big games push past the 4 MB kmalloc limit. A small kernel module (xevmafix/ in the repo,
-#        oxp3-xevmafix.service) lets that array fall back to vmalloc. The .ko is built for one kernel and is skipped on any other
+#        oxp3-xevmafix.service) lets that array fall back to vmalloc. CI builds it for every SteamOS main kernel; apply downloads it
 #    16) PQ HDR on the OLED - a small kernel module (xehdrfix/ in the repo, oxp3-xehdrfix.service, loaded before the
 #        display session) clears the MSA colorimetry bit and the DPCD fixed-vtotal AS SDP bit that break Panel Replay with
-#        PQ, and writes the VSC SDP header again when xe left a bad ECC. Built for one kernel, skipped on any other
+#        PQ, and writes the VSC SDP header again when xe left a bad ECC. Downloaded like step 15
 # Usage:
 #   ./oxp3-apply-fixes.sh                apply (asks sudo password, prints the plan and confirms)
 #   ./oxp3-apply-fixes.sh --check        check only, changes nothing, needs no sudo (covers every fix, gyro included when enabled)
@@ -230,14 +230,14 @@ MANGO_LAUNCH="$USER_HOME/oxp3-fix/oxp3-mangoapp-launch.sh"   # starts MANGO_BIN,
 MANGO_DROPIN=/etc/systemd/user/gamescope-mangoapp.service.d/oxp3-mangoapp.conf
 MANGO_FOR="0.8.3.rc1.r24.g33c2c7dd"                         # the SteamOS mangohud package the patch was built from
 MANGO_SHA256="c79ca83722d0bc4dfb3f91388b2bbc012bfe8a30191df8c7996879a1a8d6645f"
-XEVMA_KO="$ROOT_DIR/xevmafix.ko"
+# xevmafix / xehdrfix are built by CI (.github/workflows/modules.yml) for every SteamOS main kernel and published in the
+# "modules" release with a SHA256SUMS list; apply downloads the pair for the running kernel. One file per kernel:
+# the units load <name>-%v.ko, so after a kernel update they skip until the script fetched the new build.
+MOD_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/modules"
+XEVMA_KO="$ROOT_DIR/xevmafix-$(uname -r).ko"
 XEVMA_UNIT=/etc/systemd/system/oxp3-xevmafix.service
-XEVMA_FOR="7.2.7-valve2-3-neptune-72-g31504582a073"
-XEVMA_SHA256="91133104b8773ca77d4e2b6a78838e9060a1d9b86f8851080b01499109b86251"
-XEHDR_KO="$ROOT_DIR/xehdrfix.ko"
+XEHDR_KO="$ROOT_DIR/xehdrfix-$(uname -r).ko"
 XEHDR_UNIT=/etc/systemd/system/oxp3-xehdrfix.service
-XEHDR_FOR="7.2.7-valve2-3-neptune-72-g31504582a073"
-XEHDR_SHA256="a486e3ecb0b663a9b1d2d25a2e4498261944f67842bbed45672ad802ef41949d"
 XEHDR_FLAG=/sys/module/xehdrfix/parameters/counters             # the step 3 lua sends PQ only while this exists
 DMC_NAME=i915/xe3lpd_dmc.bin                                 # the Panther Lake display controller firmware
 DMC_OVERRIDE=/usr/lib/firmware/updates/$DMC_NAME.zst         # firmware/updates takes precedence over the packaged file
@@ -789,8 +789,7 @@ XEVMA_UNIT_CONTENT=$(cat <<'EOT'
 [Unit]
 Description=OXP3 games survive waking from sleep (xe rebind array via kvmalloc)
 After=systemd-modules-load.service
-RequiresMountsFor=__XEVMA_KO__
-ConditionKernelVersion=__XEVMA_FOR__
+RequiresMountsFor=__ROOT_DIR__
 ConditionPathExists=__XEVMA_KO__
 
 [Service]
@@ -803,8 +802,8 @@ ExecStart=/bin/sh -c '[ -d /sys/module/xevmafix ] || exec /usr/bin/insmod __XEVM
 WantedBy=multi-user.target
 EOT
 )
-XEVMA_UNIT_CONTENT="${XEVMA_UNIT_CONTENT//__XEVMA_KO__/$XEVMA_KO}"
-XEVMA_UNIT_CONTENT="${XEVMA_UNIT_CONTENT//__XEVMA_FOR__/$XEVMA_FOR}"
+XEVMA_UNIT_CONTENT="${XEVMA_UNIT_CONTENT//__XEVMA_KO__/$ROOT_DIR/xevmafix-%v.ko}"   # %v: the running kernel
+XEVMA_UNIT_CONTENT="${XEVMA_UNIT_CONTENT//__ROOT_DIR__/$ROOT_DIR}"
 
 # loaded before the display session: the gamescope lua (step 3) picks PQ only when the module is there, and the
 # module has to see the link training of gamescope's first modeset
@@ -813,8 +812,7 @@ XEHDR_UNIT_CONTENT=$(cat <<'EOT'
 Description=OXP3 PQ HDR on the OLED with Panel Replay (xe MSA/AS SDP/VSC SDP fixes)
 After=systemd-modules-load.service
 Before=display-manager.service sddm.service
-RequiresMountsFor=__XEHDR_KO__
-ConditionKernelVersion=__XEHDR_FOR__
+RequiresMountsFor=__ROOT_DIR__
 ConditionPathExists=__XEHDR_KO__
 
 [Service]
@@ -827,8 +825,8 @@ ExecStart=/bin/sh -c '[ -d /sys/module/xehdrfix ] || exec /usr/bin/insmod __XEHD
 WantedBy=multi-user.target
 EOT
 )
-XEHDR_UNIT_CONTENT="${XEHDR_UNIT_CONTENT//__XEHDR_KO__/$XEHDR_KO}"
-XEHDR_UNIT_CONTENT="${XEHDR_UNIT_CONTENT//__XEHDR_FOR__/$XEHDR_FOR}"
+XEHDR_UNIT_CONTENT="${XEHDR_UNIT_CONTENT//__XEHDR_KO__/$ROOT_DIR/xehdrfix-%v.ko}"   # %v: the running kernel
+XEHDR_UNIT_CONTENT="${XEHDR_UNIT_CONTENT//__ROOT_DIR__/$ROOT_DIR}"
 
 # ---- TDP: MSR package PL1 follows the MMIO package PL1 (step 8) --------------------
 TDP_SH_CONTENT=$(cat <<'EOT'
@@ -1703,8 +1701,8 @@ igpu_without_hwmon() { [ "$(basename "$(readlink /sys/class/drm/card0/device/dri
 mango_bin_ok() { [ -f "$MANGO_BIN" ] && [ "$(sha256sum "$MANGO_BIN" | cut -d' ' -f1)" = "$MANGO_SHA256" ]; }
 mango_matches() { pacman -Q mangohud 2>/dev/null | grep -q "^mangohud $MANGO_FOR-"; }
 xe_gpu() { [ "$(basename "$(readlink /sys/class/drm/card0/device/driver 2>/dev/null)")" = xe ]; }
-xevma_kernel_ok() { [ "$KVER" = "$XEVMA_FOR" ]; }
-xevma_ko_ok() { [ -f "$XEVMA_KO" ] && [ "$(sha256sum "$XEVMA_KO" | cut -d' ' -f1)" = "$XEVMA_SHA256" ]; }
+mod_ko_ok() { [ -f "$1" ] && [ "$(modinfo -F vermagic "$1" 2>/dev/null | cut -d' ' -f1)" = "$KVER" ]; }   # built for this kernel
+xevma_ko_ok() { mod_ko_ok "$XEVMA_KO"; }
 xevma_loaded() { [ -d /sys/module/xevmafix ]; }
 xevma_handled() {
     local n big
@@ -1715,8 +1713,35 @@ xevma_handled() {
         echo "$n rebinds above 8 KB since boot, largest ${big:-0} entries (under the 4 MB kmalloc limit, none would have failed)"
     fi
 }
-xehdr_kernel_ok() { [ "$KVER" = "$XEHDR_FOR" ]; }
-xehdr_ko_ok() { [ -f "$XEHDR_KO" ] && [ "$(sha256sum "$XEHDR_KO" | cut -d' ' -f1)" = "$XEHDR_SHA256" ]; }
+xehdr_ko_ok() { mod_ko_ok "$XEHDR_KO"; }
+MOD_TMP=""
+mod_fetch() { # mod_fetch <name> <file>: install the build of module <name> for the running kernel as <file>
+    local name="$1" dest="$2" f="$1-$KVER.ko" src="" sum _o
+    if mod_ko_ok "$SCRIPT_DIR/$f"; then
+        src="$SCRIPT_DIR/$f"; say "  $f from next to this script"
+    elif ! command -v curl >/dev/null 2>&1 || ! ip route 2>/dev/null | grep -q '^default'; then
+        say "  [skip] $name: no network to download the build for kernel $KVER"; return 1
+    else
+        [ -n "$MOD_TMP" ] || MOD_TMP="$(mktemp -d "${TMPDIR:-/tmp}/oxp3-mod.XXXXXX")"
+        if [ ! -s "$MOD_TMP/SHA256SUMS" ] && ! curl -fsSL --retry 3 -o "$MOD_TMP/SHA256SUMS" "$MOD_URL/SHA256SUMS"; then
+            say "  [skip] $name: could not download $MOD_URL/SHA256SUMS"; return 1
+        fi
+        sum="$(awk -v f="$f" '$2 == f { print $1; exit }' "$MOD_TMP/SHA256SUMS")"
+        if [ -z "$sum" ]; then
+            say "  [skip] $name: no build for kernel $KVER yet (CI checks for a new SteamOS main kernel every 12 hours; run this script again later)"; return 1
+        fi
+        say "  [run] downloading $MOD_URL/$f ..."
+        if ! curl -fsSL --retry 3 -o "$MOD_TMP/$f" "$MOD_URL/$f" || [ "$(sha256sum "$MOD_TMP/$f" | cut -d' ' -f1)" != "$sum" ] || ! mod_ko_ok "$MOD_TMP/$f"; then
+            say "  [skip] $name: download failed or the sha256 does not match"; return 1
+        fi
+        src="$MOD_TMP/$f"
+    fi
+    root_install "$src" "$dest" 644
+    for _o in "$ROOT_DIR/$name.ko" "$ROOT_DIR/$name"-*.ko; do   # builds for older kernels (and the pre-CI name)
+        [ -f "$_o" ] && [ "$_o" != "$dest" ] && { sudo rm -f "$_o"; say "  [remove] $_o (build for another kernel or old file name)"; }
+    done
+    return 0
+}
 xehdr_loaded() { [ -e "$XEHDR_FLAG" ]; }
 xehdr_handled() {
     local msa vsc as
@@ -1962,12 +1987,12 @@ if igpu_without_hwmon; then
 fi
 if xe_gpu; then
     if xevma_loaded; then XEVMA_STATE="loaded, $(xevma_handled)"
-    elif xevma_kernel_ok; then XEVMA_STATE="not loaded (big games can crash with \"out of memory\" after sleep)"
-    else XEVMA_STATE="not available for kernel $KVER (the module is built for $XEVMA_FOR)"; fi
+    elif xevma_ko_ok; then XEVMA_STATE="not loaded (big games can crash with \"out of memory\" after sleep)"
+    else XEVMA_STATE="no module for kernel $KVER installed yet (run the script; big games can crash after sleep)"; fi
     say "  games after sleep (xevmafix) : $XEVMA_STATE"
     if xehdr_loaded; then XEHDR_STATE="loaded, HDR games get PQ ($(xehdr_handled))"
-    elif xehdr_kernel_ok; then XEHDR_STATE="not loaded (HDR games use the gamma-2.2 path)"
-    else XEHDR_STATE="not available for kernel $KVER (built for $XEHDR_FOR), HDR games use the gamma-2.2 path"; fi
+    elif xehdr_ko_ok; then XEHDR_STATE="not loaded (HDR games use the gamma-2.2 path)"
+    else XEHDR_STATE="no module for kernel $KVER installed yet (run the script), HDR games use the gamma-2.2 path"; fi
     say "  PQ HDR (xehdrfix) : $XEHDR_STATE"
 fi
 if [ -n "$IPF_BLOCK" ]; then
@@ -2075,21 +2100,17 @@ if [ "$MODE" = "--check" ]; then
         if [ "$(dmc_system_sha)" != "$DMC_SHA256" ] && ! dmc_override_ok; then say "  [diff] SteamOS ships a newer DMC and the v2.20 override is missing"; ok=0; fi
         if [ -n "$DMC_RUNNING" ] && [ "$DMC_RUNNING" != v2.20 ]; then say "  [diff] the running kernel loaded DMC $DMC_RUNNING (reboot after apply)"; ok=0; fi
     fi
-    if xe_gpu && xevma_kernel_ok; then
-        xevma_ko_ok || { say "  [diff] xevmafix.ko missing or differs (apply takes it from the release archive)"; ok=0; }
+    if xe_gpu; then
+        xevma_ko_ok || { say "  [diff] no xevmafix for kernel $KVER (apply downloads it)"; ok=0; }
         same_content "$XEVMA_UNIT" "$XEVMA_UNIT_CONTENT" || { say "  [diff] xevmafix unit missing or differs"; ok=0; }
         systemctl is-enabled -q oxp3-xevmafix.service 2>/dev/null || { say "  [diff] oxp3-xevmafix.service not enabled"; ok=0; }
         xevma_loaded || { say "  [diff] xevmafix is not loaded"; ok=0; }
-    elif xe_gpu; then
-        say "  [info] xevmafix is built for kernel $XEVMA_FOR and this is $KVER: big games can crash after sleep until a rebuilt module ships"
     fi
-    if xe_gpu && xehdr_kernel_ok; then
-        xehdr_ko_ok || { say "  [diff] xehdrfix.ko missing or differs (apply takes it from the release archive)"; ok=0; }
+    if xe_gpu; then
+        xehdr_ko_ok || { say "  [diff] no xehdrfix for kernel $KVER (apply downloads it)"; ok=0; }
         same_content "$XEHDR_UNIT" "$XEHDR_UNIT_CONTENT" || { say "  [diff] xehdrfix unit missing or differs"; ok=0; }
         systemctl is-enabled -q oxp3-xehdrfix.service 2>/dev/null || { say "  [diff] oxp3-xehdrfix.service not enabled"; ok=0; }
         xehdr_loaded || { say "  [diff] xehdrfix is not loaded"; ok=0; }
-    elif xe_gpu; then
-        say "  [info] xehdrfix is built for kernel $XEHDR_FOR and this is $KVER: HDR games use the gamma-2.2 path until a rebuilt module ships"
     fi
     if [ "$SDTDP_WANT" = 1 ] && have_decky; then
         sdtdp_installed || { say "  [diff] SimpleDeckyTDP-Intel is opted in but not installed"; ok=0; }
@@ -2198,9 +2219,9 @@ if [ "$MODE" = "--revert" ]; then
     if [ -f "$PANEL_UNIT" ]; then sudo systemctl disable oxp3-panel-fix.service 2>/dev/null || true; sudo rm -f "$PANEL_UNIT"; sudo systemctl daemon-reload; say "  oxp3-panel-fix.service removed (the driver's PSR and LOBF return after the reboot)"; NEED_REBOOT=1; fi
     if [ -f "$PANEL_SH" ]; then sudo rm -f "$PANEL_SH"; say "  removed $PANEL_SH"; fi
     if [ -f "$XEVMA_UNIT" ]; then sudo systemctl disable oxp3-xevmafix.service 2>/dev/null || true; sudo rm -f "$XEVMA_UNIT"; sudo systemctl daemon-reload; say "  oxp3-xevmafix.service removed (the module stays loaded until the reboot)"; xevma_loaded && NEED_REBOOT=1; fi
-    if [ -f "$XEVMA_KO" ]; then sudo rm -f "$XEVMA_KO"; say "  removed $XEVMA_KO"; fi
+    for _f in "$ROOT_DIR"/xevmafix*.ko; do [ -f "$_f" ] && { sudo rm -f "$_f"; say "  removed $_f"; }; done
     if [ -f "$XEHDR_UNIT" ]; then sudo systemctl disable oxp3-xehdrfix.service 2>/dev/null || true; sudo rm -f "$XEHDR_UNIT"; sudo systemctl daemon-reload; say "  oxp3-xehdrfix.service removed (the module stays loaded until the reboot)"; xehdr_loaded && NEED_REBOOT=1; fi
-    if [ -f "$XEHDR_KO" ]; then sudo rm -f "$XEHDR_KO"; say "  removed $XEHDR_KO"; fi
+    for _f in "$ROOT_DIR"/xehdrfix*.ko; do [ -f "$_f" ] && { sudo rm -f "$_f"; say "  removed $_f"; }; done
     if [ -f "$RAPL_UNIT" ]; then sudo systemctl disable --now oxp3-rapl-overlay.service 2>/dev/null || true; sudo rm -f "$RAPL_UNIT"; sudo systemctl daemon-reload; say "  oxp3-rapl-overlay.service stopped and removed (CPU energy counter root-only again)"; fi
     if [ -f "$RAPL_PY" ]; then sudo rm -f "$RAPL_PY"; say "  removed $RAPL_PY"; fi
     if [ -f "$MANGO_DROPIN" ]; then sudo rm -f "$MANGO_DROPIN"; sudo rmdir "$(dirname "$MANGO_DROPIN")" 2>/dev/null || true; user_systemctl daemon-reload; say "  removed $MANGO_DROPIN (stock mangoapp from the next overlay start)"; fi
@@ -2310,13 +2331,13 @@ elif panel_fix_needed; then PANEL_NOTE="[AMS881KB01 on BIOS $BIOS_VER]"
 else PANEL_NOTE="[SKIPPED: needs the AMS881KB01 panel on BIOS $PANEL_BIOS_MIN or later; use --force-panel]"; fi
 say "  13) $PANEL_SH + $PANEL_UNIT (OLED: LOBF and PSR/Panel Replay off at boot)   $PANEL_NOTE"
 if ! xe_gpu; then XEVMA_NOTE="[SKIPPED: not an xe GPU]"
-elif ! xevma_kernel_ok; then XEVMA_NOTE="[SKIPPED: built for kernel $XEVMA_FOR, this is $KVER]"
 elif xevma_loaded; then XEVMA_NOTE="[loaded]"
-else XEVMA_NOTE="[from the release archive, sha256 pinned, loads right away]"; fi
+elif xevma_ko_ok; then XEVMA_NOTE="[installed for $KVER, loads right away]"
+else XEVMA_NOTE="[downloads the build for kernel $KVER (modules release, sha256 checked), loads right away]"; fi
 if ! xe_gpu; then XEHDR_NOTE="[SKIPPED: not an xe GPU]"
-elif ! xehdr_kernel_ok; then XEHDR_NOTE="[SKIPPED: built for kernel $XEHDR_FOR, this is $KVER; HDR stays on the gamma-2.2 path]"
 elif xehdr_loaded; then XEHDR_NOTE="[loaded]"
-else XEHDR_NOTE="[from the release archive, sha256 pinned, loads right away, PQ from the next game mode start]"; fi
+elif xehdr_ko_ok; then XEHDR_NOTE="[installed for $KVER, PQ from the next game mode start]"
+else XEHDR_NOTE="[downloads the build for kernel $KVER (modules release, sha256 checked), PQ from the next game mode start]"; fi
 if [ "$SDTDP_REQ" = 0 ]; then
     say "  14) SimpleDeckyTDP-Intel: REMOVE $SDTDP_PLUGIN (--no-sdtdp)"
 elif [ "$SDTDP_WANT" = 1 ] && ! have_decky; then
@@ -2908,17 +2929,14 @@ fi
 
 if ! xe_gpu; then
     say "  [skip] xevmafix: not an xe GPU"
-elif ! xevma_kernel_ok; then
-    say "  [skip] xevmafix is built for kernel $XEVMA_FOR and this is $KVER (big games can crash after sleep until a rebuilt module ships)"
 else
     XEVMA_OK=1
     if xevma_ko_ok; then
         say "  [skip] $XEVMA_KO unchanged"
-    elif [ -f "$SCRIPT_DIR/xevmafix.ko" ] && [ "$(sha256sum "$SCRIPT_DIR/xevmafix.ko" | cut -d' ' -f1)" = "$XEVMA_SHA256" ]; then
-        root_install "$SCRIPT_DIR/xevmafix.ko" "$XEVMA_KO" 644
-        say "  [write] $XEVMA_KO (from the release archive, sha256 verified)"; CHANGED=1
+    elif mod_fetch xevmafix "$XEVMA_KO"; then
+        say "  [write] $XEVMA_KO"; CHANGED=1
     else
-        say "  [skip] xevmafix.ko is not next to this script or its sha256 differs (it comes with the release archive)"; XEVMA_OK=0
+        XEVMA_OK=0; say "  (big games can crash with \"out of memory\" after sleep until the module is there)"
     fi
     if [ "$XEVMA_OK" = 1 ]; then
         if same_content "$XEVMA_UNIT" "$XEVMA_UNIT_CONTENT"; then
@@ -2944,17 +2962,14 @@ fi
 
 if ! xe_gpu; then
     say "  [skip] xehdrfix: not an xe GPU"
-elif ! xehdr_kernel_ok; then
-    say "  [skip] xehdrfix is built for kernel $XEHDR_FOR and this is $KVER (HDR games use the gamma-2.2 path until a rebuilt module ships)"
 else
     XEHDR_OK=1
     if xehdr_ko_ok; then
         say "  [skip] $XEHDR_KO unchanged"
-    elif [ -f "$SCRIPT_DIR/xehdrfix.ko" ] && [ "$(sha256sum "$SCRIPT_DIR/xehdrfix.ko" | cut -d' ' -f1)" = "$XEHDR_SHA256" ]; then
-        root_install "$SCRIPT_DIR/xehdrfix.ko" "$XEHDR_KO" 644
-        say "  [write] $XEHDR_KO (from the release archive, sha256 verified)"; CHANGED=1
+    elif mod_fetch xehdrfix "$XEHDR_KO"; then
+        say "  [write] $XEHDR_KO"; CHANGED=1
     else
-        say "  [skip] xehdrfix.ko is not next to this script or its sha256 differs (it comes with the release archive)"; XEHDR_OK=0
+        XEHDR_OK=0; say "  (HDR games use the gamma-2.2 path until the module is there)"
     fi
     if [ "$XEHDR_OK" = 1 ]; then
         if same_content "$XEHDR_UNIT" "$XEHDR_UNIT_CONTENT"; then
@@ -2977,6 +2992,8 @@ else
         fi
     fi
 fi
+
+[ -n "$MOD_TMP" ] && rm -rf "$MOD_TMP"
 
 # copies that root services used to run from ~/oxp3-fix: gone once no unit points at them any more
 for _f in $OLD_USER_COPIES; do

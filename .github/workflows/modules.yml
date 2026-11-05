@@ -1,0 +1,84 @@
+# Builds xevmafix / xehdrfix for every new SteamOS main kernel and publishes them to the "modules" release
+# (a pre-release that never becomes "latest"). oxp3-apply-fixes.sh downloads the pair for the running kernel from there.
+name: kernel modules
+
+on:
+  schedule:
+    - cron: '17 */12 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Build and upload even when this kernel is already published'
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'xevmafix/xevmafix.c'
+      - 'xehdrfix/xehdrfix.c'
+      - 'ci/**'
+      - '.github/workflows/modules.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kernel-modules
+  cancel-in-progress: false
+
+env:
+  TAG: modules
+  DB_URL: https://steamdeck-packages.steamos.cloud/archlinux-mirror/jupiter-main/os/x86_64/jupiter-main.db
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find the current kernel package
+        id: kernel
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o /tmp/jupiter-main.db "$DB_URL"
+          ver=$(tar -xOf /tmp/jupiter-main.db --wildcards 'linux-neptune-72-headers-*/desc' | sed -n '/^%VERSION%$/{n;p;q}')
+          [ -n "$ver" ] || { echo "no linux-neptune-72-headers in jupiter-main"; exit 1; }
+          # a source change (push) rebuilds the current kernel too: the published module must match the source
+          src=$(cat xevmafix/xevmafix.c xehdrfix/xehdrfix.c | sha256sum | cut -c1-16)
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+          echo "src=$src" >> "$GITHUB_OUTPUT"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --prerelease --latest=false --title "Kernel modules (automatic builds)" \
+              --notes "xevmafix and xehdrfix built by CI for each SteamOS main kernel. oxp3-apply-fixes.sh downloads the pair for the running kernel; you do not need these files by hand. SHA256SUMS lists every module, index.txt maps package version + source hash to the kernel release."
+          fi
+          gh release download "$TAG" -p index.txt -D /tmp/rel 2>/dev/null || true
+          touch /tmp/rel/index.txt 2>/dev/null || { mkdir -p /tmp/rel; touch /tmp/rel/index.txt; }
+          if [ "${{ github.event.inputs.force }}" != true ] && grep -q "^$ver $src " /tmp/rel/index.txt; then
+            echo "kernel $ver with source $src is already published"
+            echo "new=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build in an Arch container with the SteamOS repositories
+        if: steps.kernel.outputs.new == '1'
+        run: |
+          mkdir -p out
+          docker run --rm -v "$PWD:/src:ro" -v "$PWD/out:/out" docker.io/library/archlinux:latest bash /src/ci/build-modules.sh
+
+      - name: Publish
+        if: steps.kernel.outputs.new == '1'
+        run: |
+          set -euo pipefail
+          K=$(cat out/kernel)
+          gh release download "$TAG" -p SHA256SUMS -D /tmp/rel --clobber 2>/dev/null || touch /tmp/rel/SHA256SUMS
+          ( cd out && sha256sum xevmafix-"$K".ko xehdrfix-"$K".ko ) > /tmp/new.sums
+          grep -v -e " xevmafix-$K.ko\$" -e " xehdrfix-$K.ko\$" /tmp/rel/SHA256SUMS > /tmp/sums || true
+          cat /tmp/new.sums >> /tmp/sums
+          cp /tmp/sums out/SHA256SUMS
+          grep -v "^${{ steps.kernel.outputs.ver }} " /tmp/rel/index.txt > out/index.txt || true
+          echo "${{ steps.kernel.outputs.ver }} ${{ steps.kernel.outputs.src }} $K" >> out/index.txt
+          gh release upload "$TAG" --clobber out/xevmafix-"$K".ko out/xehdrfix-"$K".ko out/SHA256SUMS out/index.txt
+          cat /tmp/new.sums

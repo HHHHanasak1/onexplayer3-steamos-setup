@@ -37,13 +37,17 @@ Anything above about 10,900 mappings (4 MB / 384 bytes) hits it.
 
 ## Building
 
-The `.ko` only loads on the exact kernel it was built for. `build.sh` builds it on the device in an Arch container that uses the SteamOS package repositories and their `linux-neptune-72-headers`:
+The `.ko` only loads on the exact kernel it was built for. CI ([`.github/workflows/modules.yml`](../.github/workflows/modules.yml), [`ci/build-modules.sh`](../ci/build-modules.sh)) checks the SteamOS main repository every 12 hours. For a new `linux-neptune-72` it builds the module in an Arch container with the SteamOS repositories (packages signature-checked, Valve keys in [`ci/holo-keyring`](../ci/holo-keyring)) and uploads `xevmafix-<kernel>.ko` with a `SHA256SUMS` list to the [`modules`](https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/tag/modules) release. The script downloads the file for `uname -r` and installs it as `/var/lib/oxp3-fix/xevmafix-<kernel>.ko`; the unit loads `xevmafix-%v.ko`, so it skips on a kernel without a build.
+
+Before building, [`ci/check-xe.py`](../ci/check-xe.py) checks the new `xe.ko`: the byte signatures in `xevmafix.c` at their offsets and the symbols `xehdrfix.c` probes. If they changed, the workflow fails and nothing is published for that kernel.
+
+`build.sh` builds it on the device the same way for testing:
 
 ```
 mkdir -p ~/xevmafix-build && cp xevmafix.c Makefile ~/xevmafix-build/ && ./build.sh
 ```
 
-It prints the kernel the module is for and its sha256. Those two go into `XEVMA_FOR` and `XEVMA_SHA256` in the script and the `.ko` goes into the release archive. A rebuild of the shipped 7.2.7 module gives the same machine code as the tested one (checked for valve2-2). For valve2-3, the same kernel source built with a new toolchain, the byte check below passed and the module handled rebinds over the 4 MB limit on the device.
+A module placed next to the script as `xevmafix-<kernel>.ko` is used instead of the download.
 
 If a new kernel changes those two functions, the byte check refuses to load and the offsets in `xevmafix.c` need a look.
 
