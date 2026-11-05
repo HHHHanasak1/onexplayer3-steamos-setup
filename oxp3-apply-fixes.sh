@@ -1,12 +1,16 @@
 #!/bin/bash
 # oxp3-steamos-fixes - ONEXPLAYER 3 (Intel Panther Lake) SteamOS fix pack
-# Version: 20261104       License: MIT (see LICENSE)     Author: HANA & Claude
+# Version: 20261105       License: MIT (see LICENSE)     Author: HANA & Claude
 # Tested on: SteamOS 3.10 main build 20261103.1000, kernel 7.2.7-valve2-3-neptune-72, OXP3 BIOS 5.09,
 #            panel Samsung SDC AMS881KB01-0, SSD Predator GM7 1TB (Biwin/Maxio 1dee:1602)
 # v1.1.0: gamescope HDR lua now also registers real 30-144Hz dynamic_modegen (this panel has genuine
 #         continuous VRR; the v1.0.1 lua declared dynamic_refresh_rates but never shipped the
 #         matching dynamic_modegen function, so no extra Hz options ever actually appeared in the
 #         Steam Performance panel's per-game refresh-rate selector).
+# 20261105: the xevmafix / xehdrfix kernel modules no longer come with the release archive. CI builds them for every
+#         SteamOS main kernel (release "modules"); steps 15/16 download the pair for the running kernel (sha256 from
+#         its SHA256SUMS, vermagic checked) to /var/lib/oxp3-fix/<name>-<kernel>.ko and the units load <name>-%v.ko.
+#         A new kernel no longer needs a new fix pack. Builds exist for 7.2.7-valve2-3 and 7.2.10-valve1-3.
 # 20261104: SteamOS main 20261103.1000: xevmafix and xehdrfix rebuilt for kernel 7.2.7-valve2-3 (same source as
 #         valve2-2, new toolchain). InputPlumber 0.83 (own OXP3 support, map oxp9): step 5 writes
 #         its config with map oxp3 (Home -> Steam menu, Keyboard -> on-screen keyboard) and the dock's fe02 keyboard;
@@ -105,7 +109,7 @@
 #         the hid-oxp sysfs (driver pages 1-2 only, never raw hidraw); new --mcu-restore (DANGEROUS, explicit, confirmed)
 #         rewrites MCU button-table page 3 (Home 0x24 + factory-default 0x21/0x25-0x2B) to recover a Home/Xbox
 #         key that went silent after a foreign tool overwrote the MCU table.
-OXP3_FIXES_VERSION="20261104"
+OXP3_FIXES_VERSION="20261105"
 TESTED_STEAMOS_BUILD="20261103.1000"
 TESTED_KERNEL_PREFIX="7.2.7-valve2"
 # ============================================================================
@@ -262,7 +266,7 @@ GYRO_CONF=/etc/inputplumber/oxp3-gyro-steer.conf             # tuning, hot-reloa
 ACPI_IMG=/boot/acpi_override.img
 GRUB_IMU_FILE=/etc/default/grub.d/oxp3-imu.cfg
 GYRO_BIOS="5.09"                                             # the ACPI override is a patched copy of this BIOS's SSDT26
-PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261104/oxp3-fix.tar.gz"
+PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261105/oxp3-fix.tar.gz"
 IPF_PKG_URL="$PKG_URL"   # release archive holding the binary
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"                  # the extracted release archive, if the script came from it
 ACPI_IMG_SHA256="0e9b716e65978ac7365fda6fddf476a18b352a2d1ed98f4f30c8d3f8558b2113"
