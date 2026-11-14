@@ -1,5 +1,6 @@
-# Builds xevmafix / xehdrfix for every new SteamOS main kernel and publishes them to the "modules" release
-# (a pre-release that never becomes "latest"). oxp3-apply-fixes.sh downloads the pair for the running kernel from there.
+# Builds xevmafix / xehdrfix for every SteamOS kernel from 7.2 on, in the main repositories and in the release
+# repositories listed in REPOS, and publishes them to the "modules" release (a pre-release that never becomes
+# "latest"). oxp3-apply-fixes.sh downloads the pair for the running kernel from there.
 name: kernel modules
 
 on:
@@ -8,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: 'Build and upload even when this kernel is already published'
+        description: 'Build and upload even when a kernel is already published'
         type: boolean
         default: false
   push:
@@ -28,57 +29,94 @@ concurrency:
 
 env:
   TAG: modules
-  DB_URL: https://steamdeck-packages.steamos.cloud/archlinux-mirror/jupiter-main/os/x86_64/jupiter-main.db
+  # SteamOS repository sets to watch: "main" (jupiter-main, ...) and the release ones (jupiter-3.10, ...).
+  # A SteamOS image can use either: main builds have used the 3.10 repositories since 20261113.101.
+  REPOS: 'main 3.10'
+  # oldest kernel series the OXP3 runs (Panther Lake xe support); older linux-neptune-* packages are skipped
+  MIN_KERNEL: '7.2'
+  MIRROR: https://steamdeck-packages.steamos.cloud/archlinux-mirror
   GH_TOKEN: ${{ github.token }}
   GH_REPO: ${{ github.repository }}
 
 jobs:
-  build:
+  find:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.kernels.outputs.matrix }}
+      src: ${{ steps.kernels.outputs.src }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Find the current kernel package
-        id: kernel
+      - name: Find the kernel packages without published modules
+        id: kernels
         run: |
           set -euo pipefail
-          curl -fsSL --retry 3 -o /tmp/jupiter-main.db "$DB_URL"
-          ver=$(tar -xOf /tmp/jupiter-main.db --wildcards 'linux-neptune-72-headers-*/desc' | sed -n '/^%VERSION%$/{n;p;q}')
-          [ -n "$ver" ] || { echo "no linux-neptune-72-headers in jupiter-main"; exit 1; }
-          # a source change (push) rebuilds the current kernel too: the published module must match the source
+          # a source change (push) rebuilds every kernel too: the published modules must match the source
           src=$(cat xevmafix/xevmafix.c xehdrfix/xehdrfix.c | sha256sum | cut -c1-16)
-          echo "ver=$ver" >> "$GITHUB_OUTPUT"
-          echo "src=$src" >> "$GITHUB_OUTPUT"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --prerelease --latest=false --title "Kernel modules (automatic builds)" \
-              --notes "xevmafix and xehdrfix built by CI for each SteamOS main kernel. oxp3-apply-fixes.sh downloads the pair for the running kernel; you do not need these files by hand. SHA256SUMS lists every module, index.txt maps package version + source hash to the kernel release."
+              --notes "xevmafix and xehdrfix built by CI for each SteamOS kernel (main and release repositories). oxp3-apply-fixes.sh downloads the pair for the running kernel; you do not need these files by hand. SHA256SUMS lists every module, index.txt maps package version + source hash to the kernel release."
           fi
+          mkdir -p /tmp/rel
           gh release download "$TAG" -p index.txt -D /tmp/rel 2>/dev/null || true
-          touch /tmp/rel/index.txt 2>/dev/null || { mkdir -p /tmp/rel; touch /tmp/rel/index.txt; }
-          if [ "${{ github.event.inputs.force }}" != true ] && grep -q "^$ver $src " /tmp/rel/index.txt; then
-            echo "kernel $ver with source $src is already published"
-            echo "new=0" >> "$GITHUB_OUTPUT"
-          else
-            echo "new=1" >> "$GITHUB_OUTPUT"
-          fi
+          touch /tmp/rel/index.txt
+          : > /tmp/todo
+          for repo in $REPOS; do
+            db="/tmp/jupiter-$repo.db"
+            curl -fsSL --retry 3 -o "$db" "$MIRROR/jupiter-$repo/os/x86_64/jupiter-$repo.db"
+            # linux-neptune-<series>-headers-<version>/ only: not -devel, -drm-exec, -kasan, ...
+            found=0
+            for entry in $(tar -tf "$db" | grep -oE '^linux-neptune-[0-9]+-headers-[0-9][^/]*' | sort -u); do
+              pkg=${entry%%-headers-*}; ver=${entry#"$pkg"-headers-}
+              kver=${ver%%.valve*}
+              [ "$(printf '%s\n%s\n' "$MIN_KERNEL" "$kver" | sort -V | head -n1)" = "$MIN_KERNEL" ] || continue
+              found=1
+              if grep -q " $pkg $ver$" /tmp/todo; then continue; fi   # same package in two repositories
+              if [ "${{ github.event.inputs.force }}" != true ] && grep -q "^$ver $src " /tmp/rel/index.txt; then
+                echo "$pkg $ver ($repo): already published"
+                continue
+              fi
+              echo "$pkg $ver ($repo): to build"
+              echo "$repo $pkg $ver" >> /tmp/todo
+            done
+            [ "$found" = 1 ] || { echo "no kernel from $MIN_KERNEL on in jupiter-$repo"; exit 1; }
+          done
+          matrix=$(jq -Rnc '[inputs | split(" ") | {repo: .[0], pkg: .[1], ver: .[2]}]' < /tmp/todo)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "src=$src" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: find
+    if: needs.find.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1   # each job rewrites SHA256SUMS and index.txt in the release
+      matrix:
+        include: ${{ fromJSON(needs.find.outputs.matrix) }}
+    name: build ${{ matrix.pkg }} ${{ matrix.ver }} (${{ matrix.repo }})
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Build in an Arch container with the SteamOS repositories
-        if: steps.kernel.outputs.new == '1'
         run: |
           mkdir -p out
-          docker run --rm -v "$PWD:/src:ro" -v "$PWD/out:/out" docker.io/library/archlinux:latest bash /src/ci/build-modules.sh
+          docker run --rm -e REPO='${{ matrix.repo }}' -e PKG='${{ matrix.pkg }}' -e VER='${{ matrix.ver }}' \
+            -v "$PWD:/src:ro" -v "$PWD/out:/out" docker.io/library/archlinux:latest bash /src/ci/build-modules.sh
 
       - name: Publish
-        if: steps.kernel.outputs.new == '1'
         run: |
           set -euo pipefail
           K=$(cat out/kernel)
+          ver='${{ matrix.ver }}'
+          mkdir -p /tmp/rel
           gh release download "$TAG" -p SHA256SUMS -D /tmp/rel --clobber 2>/dev/null || touch /tmp/rel/SHA256SUMS
+          gh release download "$TAG" -p index.txt -D /tmp/rel --clobber 2>/dev/null || touch /tmp/rel/index.txt
           ( cd out && sha256sum xevmafix-"$K".ko xehdrfix-"$K".ko ) > /tmp/new.sums
           grep -v -e " xevmafix-$K.ko\$" -e " xehdrfix-$K.ko\$" /tmp/rel/SHA256SUMS > /tmp/sums || true
           cat /tmp/new.sums >> /tmp/sums
           cp /tmp/sums out/SHA256SUMS
-          grep -v "^${{ steps.kernel.outputs.ver }} " /tmp/rel/index.txt > out/index.txt || true
-          echo "${{ steps.kernel.outputs.ver }} ${{ steps.kernel.outputs.src }} $K" >> out/index.txt
+          grep -v "^$ver " /tmp/rel/index.txt > out/index.txt || true
+          echo "$ver ${{ needs.find.outputs.src }} $K" >> out/index.txt
           gh release upload "$TAG" --clobber out/xevmafix-"$K".ko out/xehdrfix-"$K".ko out/SHA256SUMS out/index.txt
           cat /tmp/new.sums
