@@ -1,51 +1,95 @@
-From 3656d0c0ef2c59c3e9d42e251cf0ced6e560a357 Mon Sep 17 00:00:00 2001
+From 917c6178e89862d8bce5b6448556aac8a8d96a60 Mon Sep 17 00:00:00 2001
 From: x <x@x>
-Date: Thu, 15 Oct 2026 17:02:57 +0900
+Date: Thu, 5 Nov 2026 14:56:09 +0900
 Subject: [PATCH 1/4] gpu_fdinfo: power and temperature for integrated xe GPUs
- without hwmon
+ without hwmon, SoC (package) power
 
 ---
- src/gpu_fdinfo.cpp | 59 ++++++++++++++++++++++++++++++++++++++++++++++
- src/gpu_fdinfo.h   |  8 +++++++
- 2 files changed, 67 insertions(+)
+ src/gpu_fdinfo.cpp     | 95 ++++++++++++++++++++++++++++++++++++++++++
+ src/gpu_fdinfo.h       | 22 ++++++++++
+ src/gpu_metrics_util.h |  1 +
+ 3 files changed, 118 insertions(+)
 
 diff --git a/src/gpu_fdinfo.cpp b/src/gpu_fdinfo.cpp
-index 0fdd99e..90065c1 100644
+index 0a761e4e..b008daae 100644
 --- a/src/gpu_fdinfo.cpp
 +++ b/src/gpu_fdinfo.cpp
-@@ -1,4 +1,5 @@
+@@ -3,6 +3,8 @@
+ #endif
+ 
  #include "gpu_fdinfo.h"
 +#include "file_utils.h"
++#include <unistd.h>
  
- #ifndef TEST_ONLY
- #include "hud_elements.h"
-@@ -182,6 +183,9 @@ void GPU_fdinfo::find_hwmon_sensors()
-     else
-         hwmon = find_hwmon_dir();
+ GPU_fdinfo::GPU_fdinfo(
+     const std::string driver, const std::string pci_dev, const std::string drm_node,
+@@ -14,6 +16,9 @@ GPU_fdinfo::GPU_fdinfo(
  
-+    if (hwmon.empty() && module == "xe" && find_igpu_sensors())
-+        return;
+     gpu.add_pid(pid);
+ 
++    if (driver == "xe" && !fs::exists("/sys/class/drm/" + drm_node + "/device/hwmon"))
++        find_igpu_sensors();
 +
-     if (hwmon.empty()) {
-         SPDLOG_DEBUG("hwmon: failed to find hwmon directory");
-         return;
-@@ -282,6 +286,46 @@ std::string GPU_fdinfo::find_hwmon_sensor_dir(std::string name) {
-     return "";
- }
+     thread = std::thread(&GPU_fdinfo::main_thread, this);
+     // "mangohud-gpufdinfo" wouldn't fit in the 15 byte limit
+     pthread_setname_np(thread.native_handle(), "mangohud-gpufd");
+@@ -59,6 +64,13 @@ void GPU_fdinfo::main_thread()
+         metrics.voltage = gpu.get_voltage();
+         metrics.fan_rpm = gpu.get_fan_rpm();
  
-+bool GPU_fdinfo::find_igpu_sensors()
++        if (igpu_fallback) {
++            metrics.powerUsage = igpu_energy.read();
++            metrics.temp = read_igpu_temp();
++        }
++        if (soc_available)
++            metrics.soc_power = soc_energy.read();
++
+         SPDLOG_DEBUG(
+             "pci_dev = {}, pid = {}, driver = {}, "
+             "load = {}, temp = {}, junction_temp = {}, memory_temp = {}, sys_vram_used = {}, "
+@@ -79,3 +91,86 @@ void GPU_fdinfo::main_thread()
+         );
+     }
+ }
++
++bool GPU_fdinfo::energy_counter::open(const std::string& path)
++{
++    if (access(path.c_str(), R_OK) != 0)
++        return false;
++    stream.open(path);
++    return stream.good();
++}
++
++float GPU_fdinfo::energy_counter::read()
++{
++    // the counter may be refreshed less often than we poll it: use the real time between increases
++    std::string line;
++    stream.clear();
++    stream.seekg(0);
++    if (!std::getline(stream, line) || line.empty())
++        return power;
++    uint64_t e = std::stoull(line);
++    auto t = std::chrono::steady_clock::now();
++    if (last_energy == 0 || e < last_energy) {
++        last_energy = e;
++        last_time = t;
++    } else if (e > last_energy && t > last_time) {
++        power = (e - last_energy) / 1e6f / std::chrono::duration<float>(t - last_time).count();
++        last_energy = e;
++        last_time = t;
++    }
++    return power;
++}
++
++void GPU_fdinfo::find_igpu_sensors()
 +{
 +    // RAPL PP1 is the graphics power plane on Intel client CPUs; Linux names that zone "uncore".
 +    const std::string pp1 = "/sys/class/powercap/intel-rapl:0:1";
-+    std::string pp1_name = read_line(pp1 + "/name");
-+    if (pp1_name == "uncore" && access((pp1 + "/energy_uj").c_str(), R_OK) == 0) {
-+        auto& e = hwmon_sensors["energy"];
-+        e.filename = pp1 + "/energy_uj";
-+        e.stream.open(e.filename);
-+        igpu_fallback = e.stream.good();
-+    }
++    if (read_line(pp1 + "/name") == "uncore" && igpu_energy.open(pp1 + "/energy_uj"))
++        igpu_fallback = true;
 +
 +    // the integrated GPU sits on the CPU package: use the coretemp package sensor
++    std::string temp_path;
 +    for (const auto& entry : fs::directory_iterator("/sys/class/hwmon")) {
 +        std::string dir = entry.path().string();
 +        if (read_line(dir + "/name") != "coretemp")
@@ -56,115 +100,134 @@ index 0fdd99e..90065c1 100644
 +                continue;
 +            if (read_line(label).rfind("Package id", 0) != 0)
 +                continue;
-+            auto& t = hwmon_sensors["temp"];
-+            t.filename = label.substr(0, label.size() - 6) + "_input";
-+            t.stream.open(t.filename);
-+            if (t.stream.good())
++            temp_path = label.substr(0, label.size() - 6) + "_input";
++            igpu_temp.open(temp_path);
++            if (igpu_temp.good())
 +                igpu_fallback = true;
++            else
++                temp_path.clear();
 +            break;
 +        }
 +        break;
 +    }
 +
++    // the package counter covers the whole SoC (CPU cores, GPU and the shared blocks), which the TDP limits
++    const std::string pkg = "/sys/class/powercap/intel-rapl:0";
++    if (igpu_fallback && read_line(pkg + "/name") == "package-0")
++        soc_available = soc_energy.open(pkg + "/energy_uj");
++
 +    if (igpu_fallback)
-+        SPDLOG_INFO("xe: integrated GPU without hwmon, power from {}, temperature from {}",
-+                    hwmon_sensors["energy"].filename.empty() ? "nowhere" : hwmon_sensors["energy"].filename,
-+                    hwmon_sensors["temp"].filename.empty() ? "nowhere" : hwmon_sensors["temp"].filename);
-+    return igpu_fallback;
++        SPDLOG_INFO("xe: integrated GPU without hwmon, power from {}, temperature from {}, SoC power {}",
++                    igpu_energy.stream.is_open() ? pp1 + "/energy_uj" : "nowhere",
++                    temp_path.empty() ? "nowhere" : temp_path,
++                    soc_available ? pkg + "/energy_uj" : "not available");
 +}
 +
- void GPU_fdinfo::get_current_hwmon_readings()
- {
-     for (auto& hs : hwmon_sensors) {
-@@ -305,6 +349,21 @@ void GPU_fdinfo::get_current_hwmon_readings()
- 
- float GPU_fdinfo::get_power_usage()
- {
-+    if (igpu_fallback) {
-+        // the energy counter may be refreshed less often than we poll it: use the real time between increases
-+        uint64_t e = hwmon_sensors["energy"].val;
-+        uint64_t t = os_time_get_nano();
-+        if (igpu_last_energy == 0 || e < igpu_last_energy) {
-+            igpu_last_energy = e;
-+            igpu_last_time = t;
-+        } else if (e > igpu_last_energy && t > igpu_last_time) {
-+            igpu_power = (e - igpu_last_energy) / 1e6f / ((t - igpu_last_time) / 1e9f);
-+            igpu_last_energy = e;
-+            igpu_last_time = t;
-+        }
-+        return igpu_power;
-+    }
-+
-     if (!hwmon_sensors["power"].filename.empty())
-         return static_cast<float>(hwmon_sensors["power"].val) / 1'000'000;
- 
++int GPU_fdinfo::read_igpu_temp()
++{
++    if (!igpu_temp.is_open())
++        return 0;
++    std::string line;
++    igpu_temp.clear();
++    igpu_temp.seekg(0);
++    if (!std::getline(igpu_temp, line) || line.empty())
++        return 0;
++    return static_cast<int>(std::lround(std::stoll(line) / 1000.0));
++}
 diff --git a/src/gpu_fdinfo.h b/src/gpu_fdinfo.h
-index 97e62e5..f5eada9 100644
+index 5dff3af1..96332f73 100644
 --- a/src/gpu_fdinfo.h
 +++ b/src/gpu_fdinfo.h
-@@ -91,6 +91,14 @@ private:
-     float get_power_usage();
-     float last_power = 0;
+@@ -3,6 +3,8 @@
+ #include <spdlog/spdlog.h>
+ #include "gpu_metrics_util.h"
+ #include "../mangohud-next/legacy_gpu_wrapper/wrapper.hpp"
++#include <chrono>
++#include <fstream>
  
-+    // Integrated xe GPUs have no hwmon device: use the RAPL graphics plane (PP1, "uncore") for the power and the CPU
-+    // package temperature (same die) for the temperature.
+ class GPU_fdinfo {
+ private:
+@@ -25,7 +27,27 @@ private:
+ 
+     void main_thread();
+ 
++    // Integrated xe GPUs have no hwmon device, so the GPU layer reports no power and no temperature. Then the power
++    // comes from the RAPL graphics plane (PP1, "uncore"), the temperature from the CPU package sensor (same die), and
++    // the whole SoC (RAPL package, what the TDP limits) is shown as its own item.
++    struct energy_counter {
++        std::ifstream stream;
++        uint64_t last_energy = 0;
++        std::chrono::steady_clock::time_point last_time;
++        float power = 0;
++        bool open(const std::string& path);
++        float read();
++    };
 +    bool igpu_fallback = false;
-+    uint64_t igpu_last_energy = 0;
-+    uint64_t igpu_last_time = 0;
-+    float igpu_power = 0;
-+    bool find_igpu_sensors();
++    bool soc_available = false;
++    energy_counter igpu_energy, soc_energy;
++    std::ifstream igpu_temp;
++    void find_igpu_sensors();
++    int read_igpu_temp();
 +
-     std::ifstream gpu_clock_stream;
-     void find_i915_gt_dir();
-     void find_xe_gt_dir();
+ public:
++    bool has_soc_power() const { return soc_available; }
++
+     GPU_fdinfo(
+         const std::string driver, const std::string pci_dev, const std::string drm_node,
+         uint32_t device_id, uint32_t vendor_id
+diff --git a/src/gpu_metrics_util.h b/src/gpu_metrics_util.h
+index bdc2b266..aa384f38 100644
+--- a/src/gpu_metrics_util.h
++++ b/src/gpu_metrics_util.h
+@@ -25,6 +25,7 @@ struct gpu_metrics {
+     int fan_speed;
+     int voltage;
+     bool fan_rpm;
++    float soc_power {0.0f};  // whole SoC (RAPL package), integrated xe GPUs only; 0 = not available
+ 
+     gpu_metrics()
+         : load(0), temp(0), junction_temp(0), memory_temp(0),
 -- 
-2.55.0
+2.52.0.windows.1
 
 
-From 976f7ae3d9cd338c3edae7c7ca382af1f0720ab0 Mon Sep 17 00:00:00 2001
+From 8447ccd6bdd621e9381f9021406543c7ca91f74f Mon Sep 17 00:00:00 2001
 From: x <x@x>
-Date: Fri, 16 Oct 2026 21:11:17 +0900
-Subject: [PATCH 2/4] mangoapp: exit at once on an X error instead of hanging
- in exit()
+Date: Thu, 5 Nov 2026 14:56:09 +0900
+Subject: [PATCH 2/4] mangoapp: exit at once after an X error instead of
+ hanging in the normal exit path
 
 ---
- src/app/main.cpp | 13 +++++++++++++
- 1 file changed, 13 insertions(+)
+ src/app/main.cpp | 9 +++++++++
+ 1 file changed, 9 insertions(+)
 
 diff --git a/src/app/main.cpp b/src/app/main.cpp
-index 19c465f..9c2490b 100644
+index 2371feac..83f48892 100644
 --- a/src/app/main.cpp
 +++ b/src/app/main.cpp
-@@ -317,9 +317,22 @@ static bool render(GLFWwindow* window, overlay_params& real_params) {
-     return window_size_changed;
- }
+@@ -669,6 +669,15 @@ int main(int, char**)
+         }
+     }
  
-+// Xlib's default error handler calls exit(), and exit() can hang here while static destructors wait for the
-+// worker threads, leaving a mangoapp that runs but never draws (seen when it starts before gamescope is ready at
-+// boot). Exit immediately instead, so systemd restarts it.
-+static int x_error_exit(Display* dpy, XErrorEvent* ev)
-+{
-+    char text[256];
-+    XGetErrorText(dpy, ev->error_code, text, sizeof(text));
-+    fprintf(stderr, "mangoapp: X error \"%s\" (request %d), exiting so the overlay gets restarted\n", text, ev->request_code);
-+    fflush(stderr);
-+    _exit(1);
-+}
++    // After an X error the normal exit path can hang (exit() waits in static destructors for the worker threads),
++    // leaving a mangoapp that runs but never draws (seen when it starts before gamescope is ready at boot). Exit
++    // immediately instead, so systemd restarts it.
++    if (g_x_dead.load()) {
++        fprintf(stderr, "mangoapp: X connection lost, exiting so the overlay gets restarted\n");
++        fflush(stderr);
++        _exit(1);
++    }
 +
- int main(int, char**)
- {
-     XInitThreads();
-+    XSetErrorHandler(x_error_exit);
+     shutdown(window);
  
-     // Setup window
-     glfwSetErrorCallback(glfw_error_callback);
+     glfwTerminate();
 -- 
-2.55.0
+2.52.0.windows.1
 
 
-From e43c0130ce617d8ee382e361332fe70070fe165e Mon Sep 17 00:00:00 2001
+From 3bc5af079ba2cfef67d24637805cf940ffff71ac Mon Sep 17 00:00:00 2001
 From: x <x@x>
-Date: Sun, 18 Oct 2026 10:19:59 +0900
+Date: Thu, 5 Nov 2026 14:56:09 +0900
 Subject: [PATCH 3/4] cpu: CPU power from the core power plane when the package
  includes the GPU
 
@@ -173,7 +236,7 @@ Subject: [PATCH 3/4] cpu: CPU power from the core power plane when the package
  1 file changed, 6 insertions(+)
 
 diff --git a/src/cpu.cpp b/src/cpu.cpp
-index f46faba..18a52ba 100644
+index 09d0f47a..1d2b8f92 100644
 --- a/src/cpu.cpp
 +++ b/src/cpu.cpp
 @@ -1,3 +1,4 @@
@@ -181,7 +244,7 @@ index f46faba..18a52ba 100644
  #include "cpu.h"
  #include <memory>
  #include <string>
-@@ -784,6 +785,11 @@ bool CPUStats::InitCpuPowerData() {
+@@ -922,6 +923,11 @@ bool CPUStats::InitCpuPowerData() {
              name = read_line(path + "/name");
              SPDLOG_DEBUG("powercap: name: {}", name);
              if (name == "package-0") {
@@ -194,111 +257,23 @@ index f46faba..18a52ba 100644
                  break;
              }
 -- 
-2.55.0
+2.52.0.windows.1
 
 
-From 0242e8dca13d2930b46e6c10caf277a5913d2d35 Mon Sep 17 00:00:00 2001
+From 4dedd6251010c22ce55575248b6f43e77ed5543f Mon Sep 17 00:00:00 2001
 From: x <x@x>
-Date: Sun, 18 Oct 2026 10:26:05 +0900
+Date: Thu, 5 Nov 2026 14:56:09 +0900
 Subject: [PATCH 4/4] hud: SoC (package) power element after the CPU and GPU
  for integrated xe GPUs, no empty VRAM item
 
 ---
- src/gpu_fdinfo.cpp     | 28 +++++++++++++++++++++
- src/gpu_fdinfo.h       |  9 +++++++
- src/gpu_metrics_util.h |  1 +
  src/hud_elements.cpp   | 55 ++++++++++++++++++++++++++++++++++++++++++
  src/hud_elements.h     |  2 ++
  src/overlay_params.cpp |  1 +
- 6 files changed, 96 insertions(+)
+ 3 files changed, 58 insertions(+)
 
-diff --git a/src/gpu_fdinfo.cpp b/src/gpu_fdinfo.cpp
-index 90065c1..5fb85f1 100644
---- a/src/gpu_fdinfo.cpp
-+++ b/src/gpu_fdinfo.cpp
-@@ -298,6 +298,15 @@ bool GPU_fdinfo::find_igpu_sensors()
-         igpu_fallback = e.stream.good();
-     }
- 
-+    // the package counter covers the whole SoC (CPU cores, GPU and the shared blocks), which the TDP limits
-+    const std::string pkg = "/sys/class/powercap/intel-rapl:0";
-+    if (igpu_fallback && read_line(pkg + "/name") == "package-0" && access((pkg + "/energy_uj").c_str(), R_OK) == 0) {
-+        auto& p = hwmon_sensors["soc_energy"];
-+        p.filename = pkg + "/energy_uj";
-+        p.stream.open(p.filename);
-+        soc_available = p.stream.good();
-+    }
-+
-     // the integrated GPU sits on the CPU package: use the coretemp package sensor
-     for (const auto& entry : fs::directory_iterator("/sys/class/hwmon")) {
-         std::string dir = entry.path().string();
-@@ -347,6 +356,24 @@ void GPU_fdinfo::get_current_hwmon_readings()
-     }
- }
- 
-+float GPU_fdinfo::get_soc_power()
-+{
-+    if (!soc_available)
-+        return 0;
-+    // like the PP1 reading below: the counter may be refreshed less often than we poll it
-+    uint64_t e = hwmon_sensors["soc_energy"].val;
-+    uint64_t t = os_time_get_nano();
-+    if (soc_last_energy == 0 || e < soc_last_energy) {
-+        soc_last_energy = e;
-+        soc_last_time = t;
-+    } else if (e > soc_last_energy && t > soc_last_time) {
-+        soc_power = (e - soc_last_energy) / 1e6f / ((t - soc_last_time) / 1e9f);
-+        soc_last_energy = e;
-+        soc_last_time = t;
-+    }
-+    return soc_power;
-+}
-+
- float GPU_fdinfo::get_power_usage()
- {
-     if (igpu_fallback) {
-@@ -791,6 +818,7 @@ void GPU_fdinfo::main_thread()
-         metrics.proc_vram_used = get_memory_used();
- 
-         metrics.powerUsage = get_power_usage();
-+        metrics.soc_power = get_soc_power();
-         metrics.powerLimit = static_cast<float>(hwmon_sensors["power_limit"].val) / 1'000'000;
- 
-         metrics.CoreClock = get_gpu_clock();
-diff --git a/src/gpu_fdinfo.h b/src/gpu_fdinfo.h
-index f5eada9..64d6cad 100644
---- a/src/gpu_fdinfo.h
-+++ b/src/gpu_fdinfo.h
-@@ -97,6 +97,15 @@ private:
-     uint64_t igpu_last_energy = 0;
-     uint64_t igpu_last_time = 0;
-     float igpu_power = 0;
-+    // the whole SoC (RAPL package), shown after the GPU: CPU and GPU share one power limit
-+    bool soc_available = false;
-+    uint64_t soc_last_energy = 0;
-+    uint64_t soc_last_time = 0;
-+    float soc_power = 0;
-+    float get_soc_power();
-+public:
-+    bool has_soc_power() const { return soc_available; }
-+private:
-     bool find_igpu_sensors();
- 
-     std::ifstream gpu_clock_stream;
-diff --git a/src/gpu_metrics_util.h b/src/gpu_metrics_util.h
-index b5c1075..214a7df 100644
---- a/src/gpu_metrics_util.h
-+++ b/src/gpu_metrics_util.h
-@@ -23,6 +23,7 @@ struct gpu_metrics {
-     int fan_speed;
-     int voltage;
-     bool fan_rpm;
-+    float soc_power {0.0f};  // whole SoC (RAPL package), integrated xe GPUs only; 0 = not available
- 
-     gpu_metrics()
-         : load(0), temp(0), junction_temp(0), memory_temp(0),
 diff --git a/src/hud_elements.cpp b/src/hud_elements.cpp
-index 767f81b..b394c83 100644
+index e1440fc1..e18ade2f 100644
 --- a/src/hud_elements.cpp
 +++ b/src/hud_elements.cpp
 @@ -418,6 +418,61 @@ void HudElements::gpu_stats(){
@@ -364,10 +339,10 @@ index 767f81b..b394c83 100644
      if(HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_cpu_stats]){
          ImguiNextColumnFirstItem();
 diff --git a/src/hud_elements.h b/src/hud_elements.h
-index 70deb51..67bf8ed 100644
+index 7bb8f202..b13ad336 100644
 --- a/src/hud_elements.h
 +++ b/src/hud_elements.h
-@@ -76,6 +76,8 @@ class HudElements{
+@@ -82,6 +82,8 @@ class HudElements{
          static void time();
          static void gpu_stats();
          static void cpu_stats();
@@ -377,10 +352,10 @@ index 70deb51..67bf8ed 100644
          static void io_stats();
          static void vram();
 diff --git a/src/overlay_params.cpp b/src/overlay_params.cpp
-index 45b49b9..a113371 100644
+index 27dbf250..d1099831 100644
 --- a/src/overlay_params.cpp
 +++ b/src/overlay_params.cpp
-@@ -1193,6 +1193,7 @@ parse_overlay_config(struct overlay_params *params,
+@@ -1236,6 +1236,7 @@ parse_overlay_config(struct overlay_params *params,
           HUDElements.sort_elements(option);
        }
     }
@@ -389,5 +364,5 @@ index 45b49b9..a113371 100644
  
  std::shared_ptr<overlay_params> get_params() {
 -- 
-2.55.0
+2.52.0.windows.1
 

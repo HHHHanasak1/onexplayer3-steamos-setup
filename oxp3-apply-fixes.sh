@@ -1,12 +1,21 @@
 #!/bin/bash
 # oxp3-steamos-fixes - ONEXPLAYER 3 (Intel Panther Lake) SteamOS fix pack
-# Version: 20261105       License: MIT (see LICENSE)     Author: HANA & Claude
-# Tested on: SteamOS 3.10 main build 20261103.1000, kernel 7.2.7-valve2-3-neptune-72, OXP3 BIOS 5.09,
+# Version: 20261114       License: MIT (see LICENSE)     Author: HANA & Claude
+# Tested on: SteamOS 3.10 main build 20261113.101, kernel 7.3.1-valve2-1-neptune-73, OXP3 BIOS 5.09,
 #            panel Samsung SDC AMS881KB01-0, SSD Predator GM7 1TB (Biwin/Maxio 1dee:1602)
 # v1.1.0: gamescope HDR lua now also registers real 30-144Hz dynamic_modegen (this panel has genuine
 #         continuous VRR; the v1.0.1 lua declared dynamic_refresh_rates but never shipped the
 #         matching dynamic_modegen function, so no extra Hz options ever actually appeared in the
 #         Steam Performance panel's per-game refresh-rate selector).
+# 20261114: SteamOS main 20261113.101 moves to kernel 7.3.1 (linux-neptune-73) and the 3.10 repositories. CI now builds
+#         xevmafix / xehdrfix for every kernel from 7.2 on in the main and 3.10 repositories (builds for 7.3.1-valve1-1
+#         and 7.3.1-valve2-1); the script needs no change for that.
+#         SteamOS main 20261104.1000 updated mangohud to 0.8.4.r235.g8d76620f, so the overlay fell back to the stock
+#         mangoapp (no GPU power/temperature, no SoC item). The patched mangoapp is rebuilt for it: MangoHud moved the GPU
+#         readings to a new layer, the integrated-xe fallback now sits on top of it in gpu_fdinfo, and the X error exit
+#         builds on MangoHud's own X error handling.
+#         The Wi-Fi/Bluetooth firmware step (0) is removed: SteamOS ships the BE201 firmware since 20261015.1000. Its
+#         package cache in /var/lib/oxp3-fix is deleted; --no-wifi is still accepted and does nothing.
 # 20261105: the xevmafix / xehdrfix kernel modules no longer come with the release archive. CI builds them for every
 #         SteamOS main kernel (release "modules"); steps 15/16 download the pair for the running kernel (sha256 from
 #         its SHA256SUMS, vermagic checked) to /var/lib/oxp3-fix/<name>-<kernel>.ko and the units load <name>-%v.ko.
@@ -109,16 +118,14 @@
 #         the hid-oxp sysfs (driver pages 1-2 only, never raw hidraw); new --mcu-restore (DANGEROUS, explicit, confirmed)
 #         rewrites MCU button-table page 3 (Home 0x24 + factory-default 0x21/0x25-0x2B) to recover a Home/Xbox
 #         key that went silent after a foreign tool overwrote the MCU table.
-OXP3_FIXES_VERSION="20261105"
-TESTED_STEAMOS_BUILD="20261103.1000"
-TESTED_KERNEL_PREFIX="7.2.7-valve2"
+OXP3_FIXES_VERSION="20261114"
+TESTED_STEAMOS_BUILD="20261113.101"
+TESTED_KERNEL_PREFIX="7.3.1-valve2"
 # ============================================================================
 # ONEXPLAYER 3 fix re-applier  (SteamOS 3.10, Intel Panther Lake, xe)
 # Purpose:
 #   SteamOS updates may overwrite /etc changes. This script re-applies every fix below (idempotent). Files that root
 #   services run or load are kept root-owned in /var/lib/oxp3-fix:
-#     0) Wi-Fi/Bluetooth firmware - extract only the missing BE201 files from linux-firmware-intel, downloaded by pacman
-#        (signature checked) and cached in /var/lib/oxp3-fix for offline re-runs (--no-wifi skips)
 #     1) kernel param nvme.noacpi=1 (only for the Predator GM7 / 1dee:1602 SSD) - NVMe not resuming from s2idle
 #     2) xe enable_dsb=0 - silence the per-frame xe DSB error flood under gamescope
 #     3) gamescope known-display lua - HDR with PQ output while xehdrfix (step 16) is loaded, otherwise the gamma-2.2
@@ -169,7 +176,7 @@ TESTED_KERNEL_PREFIX="7.2.7-valve2"
 #   flags: --yes (-y) no confirmation prompt | --force-nvme apply nvme.noacpi=1 on any SSD
 #          --force skip the device/OS guards and the InputPlumber/BIOS version checks (also writes our InputPlumber
 #          config on any InputPlumber version)
-#          --no-wifi skip step 0 (Wi-Fi firmware) | --force-panel apply step 13 on any BIOS
+#          --force-panel apply step 13 on any BIOS
 #          --sdtdp install SimpleDeckyTDP-Intel without asking (step 14) | --no-sdtdp remove it and stop asking
 #          --gyro enable the experimental gyro step (remembered; later runs and OS-update re-runs keep it)
 #          --no-gyro switch the gyro step off and remove its files (remembered)
@@ -177,7 +184,7 @@ TESTED_KERNEL_PREFIX="7.2.7-valve2"
 # ============================================================================
 set -euo pipefail
 
-MODE="apply"; FORCE=0; FORCE_NVME=0; FORCE_PANEL=0; ASSUME_YES=0; SKIP_WIFI=0; GYRO_REQ=""; SDTDP_REQ=""
+MODE="apply"; FORCE=0; FORCE_NVME=0; FORCE_PANEL=0; ASSUME_YES=0; GYRO_REQ=""; SDTDP_REQ=""
 for a in "$@"; do
     case "$a" in
         --check) MODE="--check" ;;
@@ -187,13 +194,13 @@ for a in "$@"; do
         --force-nvme) FORCE_NVME=1 ;;  # apply nvme.noacpi=1 regardless of SSD model
         --force-panel) FORCE_PANEL=1 ;;
         --yes|-y) ASSUME_YES=1 ;;      # no confirmation prompt
-        --no-wifi) SKIP_WIFI=1 ;;      # skip step 0 (Wi-Fi firmware)
+        --no-wifi) ;;                  # accepted and ignored: the Wi-Fi firmware step was removed in 20261114
         --gyro) GYRO_REQ=1 ;;          # enable the experimental gyro step (remembered)
         --no-gyro) GYRO_REQ=0 ;;       # disable it and remove its files (remembered)
         --sdtdp) SDTDP_REQ=1 ;;
         --no-sdtdp) SDTDP_REQ=0 ;;
         -h|--help) sed -n '2,/^set -euo pipefail/p' "$0" | grep -E '^#' | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) echo "unknown option: $a  (valid: --check | --revert | --mcu-restore | --force | --force-nvme | --force-panel | --no-wifi | --gyro | --no-gyro | --sdtdp | --no-sdtdp | --yes)"; exit 2 ;;
+        *) echo "unknown option: $a  (valid: --check | --revert | --mcu-restore | --force | --force-nvme | --force-panel | --gyro | --no-gyro | --sdtdp | --no-sdtdp | --yes)"; exit 2 ;;
     esac
 done
 # target user's home (real user when run via sudo)
@@ -207,7 +214,7 @@ fi
 # everything a root service runs or loads lives in this root-owned directory: from the user's home anything running as
 # the user could swap it and get root (or a kernel module) at the next start. /var survives SteamOS updates.
 ROOT_DIR=/var/lib/oxp3-fix
-FW_CACHE="$ROOT_DIR/pkg-cache"                 # step 0: linux-firmware-intel as pacman downloaded it (signature checked)
+FW_CACHE="$ROOT_DIR/pkg-cache"                 # package cache of the Wi-Fi firmware step removed in 20261114 (apply deletes it)
 FW_OLD_CACHE="$USER_HOME/.cache/oxp3-fix"      # its user-writable location up to 20261029
 GRUB_D_FILE=/etc/default/grub.d/oxp3-nvme.cfg
 SPLITLOCK_FILE=/etc/default/grub.d/oxp3-splitlock.cfg
@@ -232,9 +239,9 @@ RAPL_UNIT=/etc/systemd/system/oxp3-rapl-overlay.service
 MANGO_BIN="$USER_HOME/oxp3-fix/mangoapp-oxp3"               # patched mangoapp (source: mangoapp/ in the repo)
 MANGO_LAUNCH="$USER_HOME/oxp3-fix/oxp3-mangoapp-launch.sh"   # starts MANGO_BIN, or the stock mangoapp when it cannot run
 MANGO_DROPIN=/etc/systemd/user/gamescope-mangoapp.service.d/oxp3-mangoapp.conf
-MANGO_FOR="0.8.3.rc1.r24.g33c2c7dd"                         # the SteamOS mangohud package the patch was built from
-MANGO_SHA256="c79ca83722d0bc4dfb3f91388b2bbc012bfe8a30191df8c7996879a1a8d6645f"
-# xevmafix / xehdrfix are built by CI (.github/workflows/modules.yml) for every SteamOS main kernel and published in the
+MANGO_FOR="0.8.4.r235.g8d76620f"                           # the SteamOS mangohud package the patch was built from
+MANGO_SHA256="d28034b2cd83d30d87072f73e465f6ca51cf4ec5f8a771105ce9469a9472cc39"
+# xevmafix / xehdrfix are built by CI (.github/workflows/modules.yml) for every SteamOS kernel and published in the
 # "modules" release with a SHA256SUMS list; apply downloads the pair for the running kernel. One file per kernel:
 # the units load <name>-%v.ko, so after a kernel update they skip until the script fetched the new build.
 MOD_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/modules"
@@ -266,7 +273,7 @@ GYRO_CONF=/etc/inputplumber/oxp3-gyro-steer.conf             # tuning, hot-reloa
 ACPI_IMG=/boot/acpi_override.img
 GRUB_IMU_FILE=/etc/default/grub.d/oxp3-imu.cfg
 GYRO_BIOS="5.09"                                             # the ACPI override is a patched copy of this BIOS's SSDT26
-PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261105/oxp3-fix.tar.gz"
+PKG_URL="https://github.com/HHHHanasak1/onexplayer3-steamos-setup/releases/download/20261114/oxp3-fix.tar.gz"
 IPF_PKG_URL="$PKG_URL"   # release archive holding the binary
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"                  # the extracted release archive, if the script came from it
 ACPI_IMG_SHA256="0e9b716e65978ac7365fda6fddf476a18b352a2d1ed98f4f30c8d3f8558b2113"
@@ -2027,35 +2034,10 @@ elif have_decky; then
 else
     say "  SimpleDeckyTDP-Intel : Decky Loader is not installed ($SDTDP_README)"
 fi
-# Wi-Fi / Bluetooth firmware state. The kernel names the firmware family it wants in the boot log; the package that
-# provides "linux-firmware" on SteamOS (linux-firmware-neptune) does not carry every family.
-IWL_DEV=""   # Intel network controller (class 0x0280) - present even when iwlwifi gave up for lack of firmware
-for _d in /sys/bus/pci/devices/*; do
-    if [ "$(cat "$_d/class" 2>/dev/null)" = "0x028000" ] && [ "$(cat "$_d/vendor" 2>/dev/null)" = "0x8086" ]; then IWL_DEV="$(basename "$_d")"; break; fi
-done
-WL_IF="$(ls -d /sys/class/net/*/wireless 2>/dev/null | head -n1 | cut -d/ -f5 || true)"
-IWL_FAMILY="$(klog | sed -n 's/.*minimum version required: \(iwlwifi-[^ ]*\)-c\{0,1\}[0-9]*$/\1/p' | tail -n1)"
-[ -n "$IWL_FAMILY" ] || IWL_FAMILY="$(klog | sed -n 's/.*Direct firmware load for \(iwlwifi-[^ ]*\)-c\{0,1\}[0-9]*\.ucode failed.*/\1/p' | tail -n1)"
-BT_FAMILY="$(klog | sed -n 's/.*Failed to load Intel firmware file intel\/\(ibt-[0-9a-f]*-[0-9a-f]*\)-.*/\1/p' | tail -n1)"
-WIFI_MISSING=0; BT_MISSING=0
-[ -n "$IWL_DEV" ] && [ -z "$WL_IF" ] && WIFI_MISSING=1
-[ -n "$BT_FAMILY" ] && ! ls /usr/lib/firmware/intel/"$BT_FAMILY"-* >/dev/null 2>&1 && BT_MISSING=1
-if [ -n "$IWL_DEV" ]; then
-    say "  Wi-Fi (Intel $IWL_DEV) : $([ -n "$WL_IF" ] && echo "interface $WL_IF present" || echo "NO wireless interface - firmware ${IWL_FAMILY:-?} missing")"
-else
-    say "  Wi-Fi : no Intel network controller found"
-fi
-if [ -n "$BT_FAMILY" ]; then say "  Bluetooth firmware intel/$BT_FAMILY : $([ "$BT_MISSING" = 1 ] && echo MISSING || echo present)"; fi
-if command -v pacman >/dev/null 2>&1 && pacman -Q linux-firmware >/dev/null 2>&1; then
-    say "  linux-firmware package : $(pacman -Q linux-firmware | tr ' ' '-')   (SteamOS' own package; may lack newer chips)"
-fi
 
 if [ "$MODE" = "--check" ]; then
     hdr "check-only, nothing changed"
     ok=1
-    if [ "$SKIP_WIFI" != 1 ] && { [ "$WIFI_MISSING" = 1 ] || [ "$BT_MISSING" = 1 ]; }; then
-        say "  [diff] Wi-Fi/Bluetooth firmware missing (apply extracts it from linux-firmware-intel)"; ok=0
-    fi
     same_content "$GRUB_D_FILE" "$GRUB_D_CONTENT" || { say "  [diff] grub.d file missing or differs"; ok=0; }
     if have_split_lock_detect; then
         same_content "$SPLITLOCK_FILE" "$SPLITLOCK_CONTENT" || { say "  [diff] split-lock grub.d file missing or differs"; ok=0; }
@@ -2240,7 +2222,7 @@ if [ "$MODE" = "--revert" ]; then
     sudo rm -rf "$FW_CACHE"; rm -rf "$FW_OLD_CACHE"
     sudo rmdir "$ROOT_DIR" 2>/dev/null || true
     [ "$RO_INITIAL" = "enabled" ] && sudo steamos-readonly enable
-    say "revert done. (The Wi-Fi firmware step is not undone: the extracted firmware files stay in /usr/lib/firmware.)"
+    say "revert done."
     if [ $NEED_REBOOT = 1 ]; then say "reboot required for the kernel parameter change to take effect."; elif [ $NEED_RELOGIN = 1 ]; then say "re-enter game mode to reload the lua."; fi
     exit 0
 fi
@@ -2298,11 +2280,6 @@ if [ "$SDTDP_WANT" = 1 ] && [ "$SDTDP_REQ" != 0 ] && [ -d "$SDTDP_UPSTREAM" ] &&
 fi
 hdr "Applying fixes (will ask for sudo password)"
 say "  will check and write as needed:"
-if [ "$SKIP_WIFI" = 1 ]; then
-    say "   0) Wi-Fi firmware   [SKIPPED: --no-wifi]"
-else
-    say "   0) Wi-Fi/Bluetooth firmware from linux-firmware-intel   $({ [ "$WIFI_MISSING" = 1 ] || [ "$BT_MISSING" = 1 ]; } && echo "[will extract missing files]" || echo "[nothing missing]")"
-fi
 say "   1) $GRUB_D_FILE (nvme.noacpi=1) + update-grub   $(nvme_bug_present && echo "[SSD matches]" || echo "[SKIPPED: not the affected SSD; use --force-nvme]")"
 say "   2) $MODPROBE_FILE (xe enable_dsb=0)"
 say "   3) $LUA_HDR (gamescope HDR lua) and remove 99-oxp3-nohdr.lua"
@@ -2356,100 +2333,9 @@ say "  16) $XEHDR_KO + $XEHDR_UNIT (PQ HDR with Panel Replay)   $XEHDR_NOTE"
 if [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then read -r -p "  Continue? (y/N) " _ans; case "$_ans" in y|Y) ;; *) say "  cancelled."; exit 0 ;; esac; fi
 sudo -v
 
-# ---- 0. Wi-Fi / Bluetooth firmware --------------------------------------------------------------
-# SteamOS' linux-firmware-neptune provides "linux-firmware" but not every chip family (the OXP3's BE201 needs
-# iwlwifi-sc-a0-fm-c0-c10x + intel/ibt-00a0-0291-*). Download the repo's linux-firmware-intel package (cached) and
-# extract only the missing families into /usr/lib/firmware; existing files are never overwritten and no package is
-# replaced. Needs a writable rootfs and some network connection (USB Ethernet / USB tethering while Wi-Fi is down).
-WIFI_FAILED=0
-# pacman downloads the package and checks its signature; it is cached root-owned in /var, which survives OS updates, so
-# after an update Wi-Fi can be restored without any network. (Up to 20261029 the cache was the user-writable
-# ~/.cache/oxp3-fix, which root then trusted; that copy is removed.)
-FW_CACHED="$(ls -t "$FW_CACHE"/linux-firmware-intel-*.pkg.tar.zst 2>/dev/null | head -n1 || true)"
-
-HAVE_NET=0; ip route 2>/dev/null | grep -q '^default' && HAVE_NET=1
-if [ "$SKIP_WIFI" = 1 ]; then
-    say "  [skip] Wi-Fi firmware step disabled (--no-wifi)"
-elif [ "$WIFI_MISSING" != 1 ] && [ "$BT_MISSING" != 1 ]; then
-    say "  [skip] Wi-Fi/Bluetooth firmware: nothing missing"
-elif ! command -v pacman >/dev/null 2>&1; then
-    say "  [skip] pacman not found, cannot locate linux-firmware-intel"; WIFI_FAILED=1
-elif [ "$HAVE_NET" != 1 ] && [ -z "$FW_CACHED" ]; then
-    say "  [skip] no network connection and no cached package, cannot download linux-firmware-intel."
-    say "         Connect USB Ethernet or USB tethering and run this script again."
-    WIFI_FAILED=1
-else
-    hdr "0. Wi-Fi / Bluetooth firmware (from linux-firmware-intel)"
-    if [ "$RO_STATUS" = "enabled" ]; then
-        say "  rootfs is read-only; disabling so /usr/lib/firmware can be written (updates re-enable it)"
-        sudo steamos-readonly disable
-        RO_STATUS=disabled
-    fi
-    if [ "$HAVE_NET" != 1 ]; then
-        say "  [offline] no network, using the cached $(basename "$FW_CACHED")"
-        FW_URL="$FW_CACHED"
-    else
-        FW_URL="$(pacman -Sp linux-firmware-intel 2>/dev/null | grep -m1 '^http' || true)"
-    fi
-    if [ -z "$FW_URL" ]; then
-        say "  [run] pacman -Sy   (package database sync, needed to locate linux-firmware-intel)"
-        sudo pacman -Sy >/dev/null 2>&1 || true
-        FW_URL="$(pacman -Sp linux-firmware-intel 2>/dev/null | grep -m1 '^http' || true)"
-    fi
-    if [ -z "$FW_URL" ]; then
-        say "  [error] linux-firmware-intel not found in the configured repositories"; WIFI_FAILED=1
-    else
-        FW_PKG="$FW_CACHE/$(basename "$FW_URL")"
-        if [ ! -s "$FW_PKG" ]; then
-            say "  [run] pacman -Sw linux-firmware-intel (about 130 MB, signature checked by pacman) ..."
-            sudo mkdir -p "$FW_CACHE"
-            sudo pacman -Sw --noconfirm --cachedir "$FW_CACHE" linux-firmware-intel || { say "  [error] download or signature check failed"; WIFI_FAILED=1; }
-        else
-            say "  [skip] using cached $(basename "$FW_PKG")"
-        fi
-        if [ -s "$FW_PKG" ] && tar --zstd -tf "$FW_PKG" >/dev/null 2>&1; then
-            FW_PATTERNS=""
-            if [ "$WIFI_MISSING" = 1 ]; then
-                if [ -n "$IWL_FAMILY" ]; then FW_PATTERNS="$FW_PATTERNS ${IWL_FAMILY}*"; else FW_PATTERNS="$FW_PATTERNS iwlwifi-*"; fi
-            fi
-            [ "$BT_MISSING" = 1 ] && FW_PATTERNS="$FW_PATTERNS ${BT_FAMILY}-*"
-            FW_TMP="$(mktemp -d "${TMPDIR:-/tmp}/oxp3-fw.XXXXXX")"
-            say "  [run] extracting$FW_PATTERNS (files and symlinks; symlink targets are added as needed)"
-            # shellcheck disable=SC2086
-            tar --zstd -xf "$FW_PKG" -C "$FW_TMP" --wildcards --no-anchored $FW_PATTERNS 2>/dev/null || true
-            # symlinks whose target is neither on the system nor in the extracted set: pull the target from the package too
-            for _round in 1 2 3; do
-                _more=""
-                while IFS= read -r _l; do
-                    _t="$(readlink "$_l")"; _dir="$(dirname "$_l")"
-                    _sys="/usr/lib/firmware${_dir#"$FW_TMP"/usr/lib/firmware}/$_t"
-                    [ -e "$_dir/$_t" ] || [ -e "$_sys" ] || _more="$_more $(basename "$_t")"
-                done < <(find "$FW_TMP" -type l 2>/dev/null)
-                [ -n "$_more" ] || break
-                # shellcheck disable=SC2086
-                tar --zstd -xf "$FW_PKG" -C "$FW_TMP" --wildcards --no-anchored $_more 2>/dev/null || true
-            done
-            _n=$(find "$FW_TMP" \( -type f -o -type l \) | wc -l)
-            if [ "$_n" = 0 ]; then
-                say "  [error] the package has no ${IWL_FAMILY:-iwlwifi}/${BT_FAMILY:-ibt} firmware (kernel/package version mismatch)"; WIFI_FAILED=1
-            elif sudo cp -an "$FW_TMP/usr/lib/firmware/." /usr/lib/firmware/; then
-                say "  [done] $_n firmware files/links in place (existing files untouched)"
-                CHANGED=1; NEED_REBOOT=1
-                if [ "$WIFI_MISSING" = 1 ]; then
-                    say "  [run] reloading iwlwifi so Wi-Fi comes up now (Bluetooth needs the reboot)"
-                    sudo modprobe -r iwlmld iwlmvm iwlwifi 2>/dev/null || true
-                    sudo modprobe iwlwifi 2>/dev/null || true
-                    sleep 4
-                    WL_IF="$(ls -d /sys/class/net/*/wireless 2>/dev/null | head -n1 | cut -d/ -f5 || true)"
-                    say "  Wi-Fi interface now: ${WL_IF:-still missing (check: journalctl -k | grep iwlwifi)}"
-                fi
-            else
-                say "  [error] copying into /usr/lib/firmware failed"; WIFI_FAILED=1
-            fi
-            rm -rf "$FW_TMP"
-        fi
-    fi
-fi
+# Up to 20261105 a step 0 here extracted the BE201 Wi-Fi/Bluetooth firmware from linux-firmware-intel; SteamOS ships
+# it since 20261015.1000. Remove the package cache that step kept.
+if [ -d "$FW_CACHE" ]; then sudo rm -rf "$FW_CACHE"; say "  [remove] $FW_CACHE (package cache of the removed Wi-Fi firmware step)"; fi
 if [ -d "$FW_OLD_CACHE" ]; then rm -rf "$FW_OLD_CACHE"; say "  [remove] $FW_OLD_CACHE (old user-writable package cache)"; fi
 # re-read xe param now that sudo is available
 XE_DSB="$(sudo cat /sys/module/xe/parameters/enable_dsb 2>/dev/null || echo '?')"
@@ -3012,7 +2898,6 @@ if [ "$RO_INITIAL" = "enabled" ] && [ "$(steamos-readonly status 2>/dev/null | h
     sudo steamos-readonly enable && say "  [run] rootfs read-only again, as it was before this run"
 fi
 hdr "Summary"
-if [ "$WIFI_FAILED" = 1 ]; then say "  Wi-Fi/Bluetooth firmware step did not complete, see the messages above."; fi
 if [ $CHANGED = 1 ]; then say "  changes were made."; else say "  nothing to change, all fixes in place."; fi
 if [ $NEED_REBOOT = 1 ]; then
     say "  REBOOT REQUIRED (kernel parameter or xe module parameter not active yet)"
