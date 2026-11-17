@@ -134,7 +134,7 @@ Upstream bug drafts are in `issues/`.
 
 ## Tested configuration
 
-SteamOS main 20261113.101, kernel 7.3.1-valve2-1, OXP3 BIOS 5.09, panel SDC AMS881KB01-0, SSD Predator GM7 1TB. The panel fix was found and verified on BIOS 5.12. The script refuses to run on other hardware or a non-SteamOS system (`--force` overrides; on another SteamOS build or kernel it only prints a note) and applies `nvme.noacpi=1` only with a GM7 / `1dee:1602` SSD (`--force-nvme` overrides). SteamOS 20261103.1000 to 20261113.101 ship InputPlumber 0.83.1. The patched InputPlumber needs the stock InputPlumber to be 0.78.x. The InputPlumber config is written for 0.78 and 0.83; on other versions InputPlumber's own config is left alone. The gyro step also needs BIOS 5.09.
+SteamOS main 20261116.100 (3.10.1), kernel 7.3.1-valve3-1, OXP3 BIOS 5.09, panel SDC AMS881KB01-0, SSD Predator GM7 1TB. The panel fix was found and verified on BIOS 5.12. The script refuses to run on other hardware or a non-SteamOS system (`--force` overrides; on another SteamOS build or kernel it only prints a note) and applies `nvme.noacpi=1` only with a GM7 / `1dee:1602` SSD (`--force-nvme` overrides). SteamOS 20261103.1000 to 20261116.100 ship InputPlumber 0.83.1. The patched InputPlumber needs the stock InputPlumber to be 0.78.x. The InputPlumber config is written for 0.78 and 0.83; on other versions InputPlumber's own config is left alone. The gyro step also needs BIOS 5.09.
 
 ## Changelog
 
