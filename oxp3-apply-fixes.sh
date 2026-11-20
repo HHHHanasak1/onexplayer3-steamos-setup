@@ -1714,6 +1714,7 @@ mango_matches() { pacman -Q mangohud 2>/dev/null | grep -q "^mangohud $MANGO_FOR
 xe_gpu() { [ "$(basename "$(readlink /sys/class/drm/card0/device/driver 2>/dev/null)")" = xe ]; }
 mod_ko_ok() { [ -f "$1" ] && [ "$(modinfo -F vermagic "$1" 2>/dev/null | cut -d' ' -f1)" = "$KVER" ]; }   # built for this kernel
 xevma_ko_ok() { mod_ko_ok "$XEVMA_KO"; }
+xevma_not_needed() { [ -f "$ROOT_DIR/xevmafix-$KVER.not-needed" ]; }   # CI found the fix in this kernel's xe driver
 xevma_loaded() { [ -d /sys/module/xevmafix ]; }
 xevma_handled() {
     local n big
@@ -1738,6 +1739,16 @@ mod_fetch() { # mod_fetch <name> <file>: install the build of module <name> for 
             say "  [skip] $name: could not download $MOD_URL/SHA256SUMS"; return 1
         fi
         sum="$(awk -v f="$f" '$2 == f { print $1; exit }' "$MOD_TMP/SHA256SUMS")"
+        if [ -z "$sum" ] && { [ -s "$MOD_TMP/not-needed.txt" ] || curl -fsSL --retry 3 -o "$MOD_TMP/not-needed.txt" "$MOD_URL/not-needed.txt" 2>/dev/null; } \
+            && grep -qx "$name $KVER" "$MOD_TMP/not-needed.txt"; then
+            # CI checked this kernel's xe driver: it has the fix itself. Remember that, so --check does not miss the module.
+            sudo mkdir -p "$ROOT_DIR"
+            printf '%s\n' "$name is not needed on $KVER (checked by CI)" | sudo tee "$ROOT_DIR/$name-$KVER.not-needed" >/dev/null
+            for _o in "$ROOT_DIR/$name.ko" "$ROOT_DIR/$name"-*.ko "$ROOT_DIR/$name"-*.not-needed; do
+                [ -f "$_o" ] && [ "$_o" != "$ROOT_DIR/$name-$KVER.not-needed" ] && { sudo rm -f "$_o"; say "  [remove] $_o (for another kernel)"; }
+            done
+            say "  [skip] $name: not needed on kernel $KVER (its xe driver has the fix, checked by CI)"; return 2
+        fi
         if [ -z "$sum" ]; then
             say "  [skip] $name: no build for kernel $KVER yet (CI checks for a new SteamOS main kernel every 12 hours; run this script again later)"; return 1
         fi
@@ -1748,7 +1759,7 @@ mod_fetch() { # mod_fetch <name> <file>: install the build of module <name> for 
         src="$MOD_TMP/$f"
     fi
     root_install "$src" "$dest" 644
-    for _o in "$ROOT_DIR/$name.ko" "$ROOT_DIR/$name"-*.ko; do   # builds for older kernels (and the pre-CI name)
+    for _o in "$ROOT_DIR/$name.ko" "$ROOT_DIR/$name"-*.ko "$ROOT_DIR/$name"-*.not-needed; do   # builds for older kernels (and the pre-CI name)
         [ -f "$_o" ] && [ "$_o" != "$dest" ] && { sudo rm -f "$_o"; say "  [remove] $_o (build for another kernel or old file name)"; }
     done
     return 0
@@ -1997,7 +2008,8 @@ if igpu_without_hwmon; then
     say "  GPU power/temperature for the overlay : $MANGO_STATE"
 fi
 if xe_gpu; then
-    if xevma_loaded; then XEVMA_STATE="loaded, $(xevma_handled)"
+    if xevma_not_needed; then XEVMA_STATE="not needed on kernel $KVER (its xe driver allocates the rebind array with kvmalloc itself)"
+    elif xevma_loaded; then XEVMA_STATE="loaded, $(xevma_handled)"
     elif xevma_ko_ok; then XEVMA_STATE="not loaded (big games can crash with \"out of memory\" after sleep)"
     else XEVMA_STATE="no module for kernel $KVER installed yet (run the script; big games can crash after sleep)"; fi
     say "  games after sleep (xevmafix) : $XEVMA_STATE"
@@ -2086,7 +2098,7 @@ if [ "$MODE" = "--check" ]; then
         if [ "$(dmc_system_sha)" != "$DMC_SHA256" ] && ! dmc_override_ok; then say "  [diff] SteamOS ships a newer DMC and the v2.20 override is missing"; ok=0; fi
         if [ -n "$DMC_RUNNING" ] && [ "$DMC_RUNNING" != v2.20 ]; then say "  [diff] the running kernel loaded DMC $DMC_RUNNING (reboot after apply)"; ok=0; fi
     fi
-    if xe_gpu; then
+    if xe_gpu && ! xevma_not_needed; then
         xevma_ko_ok || { say "  [diff] no xevmafix for kernel $KVER (apply downloads it)"; ok=0; }
         same_content "$XEVMA_UNIT" "$XEVMA_UNIT_CONTENT" || { say "  [diff] xevmafix unit missing or differs"; ok=0; }
         systemctl is-enabled -q oxp3-xevmafix.service 2>/dev/null || { say "  [diff] oxp3-xevmafix.service not enabled"; ok=0; }
@@ -2205,7 +2217,7 @@ if [ "$MODE" = "--revert" ]; then
     if [ -f "$PANEL_UNIT" ]; then sudo systemctl disable oxp3-panel-fix.service 2>/dev/null || true; sudo rm -f "$PANEL_UNIT"; sudo systemctl daemon-reload; say "  oxp3-panel-fix.service removed (the driver's PSR and LOBF return after the reboot)"; NEED_REBOOT=1; fi
     if [ -f "$PANEL_SH" ]; then sudo rm -f "$PANEL_SH"; say "  removed $PANEL_SH"; fi
     if [ -f "$XEVMA_UNIT" ]; then sudo systemctl disable oxp3-xevmafix.service 2>/dev/null || true; sudo rm -f "$XEVMA_UNIT"; sudo systemctl daemon-reload; say "  oxp3-xevmafix.service removed (the module stays loaded until the reboot)"; xevma_loaded && NEED_REBOOT=1; fi
-    for _f in "$ROOT_DIR"/xevmafix*.ko; do [ -f "$_f" ] && { sudo rm -f "$_f"; say "  removed $_f"; }; done
+    for _f in "$ROOT_DIR"/xevmafix*.ko "$ROOT_DIR"/xevmafix-*.not-needed; do [ -f "$_f" ] && { sudo rm -f "$_f"; say "  removed $_f"; }; done
     if [ -f "$XEHDR_UNIT" ]; then sudo systemctl disable oxp3-xehdrfix.service 2>/dev/null || true; sudo rm -f "$XEHDR_UNIT"; sudo systemctl daemon-reload; say "  oxp3-xehdrfix.service removed (the module stays loaded until the reboot)"; xehdr_loaded && NEED_REBOOT=1; fi
     for _f in "$ROOT_DIR"/xehdrfix*.ko; do [ -f "$_f" ] && { sudo rm -f "$_f"; say "  removed $_f"; }; done
     if [ -f "$RAPL_UNIT" ]; then sudo systemctl disable --now oxp3-rapl-overlay.service 2>/dev/null || true; sudo rm -f "$RAPL_UNIT"; sudo systemctl daemon-reload; say "  oxp3-rapl-overlay.service stopped and removed (CPU energy counter root-only again)"; fi
@@ -2312,6 +2324,7 @@ elif panel_fix_needed; then PANEL_NOTE="[AMS881KB01 on BIOS $BIOS_VER]"
 else PANEL_NOTE="[SKIPPED: needs the AMS881KB01 panel on BIOS $PANEL_BIOS_MIN or later; use --force-panel]"; fi
 say "  13) $PANEL_SH + $PANEL_UNIT (OLED: LOBF and PSR/Panel Replay off at boot)   $PANEL_NOTE"
 if ! xe_gpu; then XEVMA_NOTE="[SKIPPED: not an xe GPU]"
+elif xevma_not_needed; then XEVMA_NOTE="[not needed on kernel $KVER: its xe driver has the fix]"
 elif xevma_loaded; then XEVMA_NOTE="[loaded]"
 elif xevma_ko_ok; then XEVMA_NOTE="[installed for $KVER, loads right away]"
 else XEVMA_NOTE="[downloads the build for kernel $KVER (modules release, sha256 checked), loads right away]"; fi
@@ -2821,12 +2834,19 @@ if ! xe_gpu; then
     say "  [skip] xevmafix: not an xe GPU"
 else
     XEVMA_OK=1
-    if xevma_ko_ok; then
+    if xevma_not_needed; then
+        XEVMA_OK=0; say "  [skip] xevmafix: not needed on kernel $KVER (its xe driver allocates the rebind array with kvmalloc itself)"
+    elif xevma_ko_ok; then
         say "  [skip] $XEVMA_KO unchanged"
-    elif mod_fetch xevmafix "$XEVMA_KO"; then
-        say "  [write] $XEVMA_KO"; CHANGED=1
     else
-        XEVMA_OK=0; say "  (big games can crash with \"out of memory\" after sleep until the module is there)"
+        rc=0; mod_fetch xevmafix "$XEVMA_KO" || rc=$?
+        if [ "$rc" = 0 ]; then
+            say "  [write] $XEVMA_KO"; CHANGED=1
+        elif [ "$rc" = 2 ]; then
+            XEVMA_OK=0   # not needed on this kernel, mod_fetch said so
+        else
+            XEVMA_OK=0; say "  (big games can crash with \"out of memory\" after sleep until the module is there)"
+        fi
     fi
     if [ "$XEVMA_OK" = 1 ]; then
         if same_content "$XEVMA_UNIT" "$XEVMA_UNIT_CONTENT"; then

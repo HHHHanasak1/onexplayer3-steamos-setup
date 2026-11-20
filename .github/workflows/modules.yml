@@ -1,4 +1,4 @@
-# Builds xevmafix / xehdrfix for every SteamOS kernel from 7.2 on, in the main repositories and in the release
+# Builds xevmafix / xehdrfix for every SteamOS kernel from MIN_KERNEL on, in the main repositories and in the release
 # repositories listed in REPOS, and publishes them to the "modules" release (a pre-release that never becomes
 # "latest"). oxp3-apply-fixes.sh downloads the pair for the running kernel from there.
 name: kernel modules
@@ -32,8 +32,9 @@ env:
   # SteamOS repository sets to watch: "main" (jupiter-main, ...) and the release ones (jupiter-3.10, ...).
   # A SteamOS image can use either: main builds have used the 3.10 repositories since 20261113.101.
   REPOS: 'main 3.10'
-  # oldest kernel series the OXP3 runs (Panther Lake xe support); older linux-neptune-* packages are skipped
-  MIN_KERNEL: '7.2'
+  # oldest kernel series a current SteamOS image for the OXP3 uses: main (20261113.101 on) and preview (20261116.100) are on 7.3;
+  # the repositories keep older linux-neptune-* packages (7.2.15 is still built in jupiter-main), those are skipped
+  MIN_KERNEL: '7.3'
   MIRROR: https://steamdeck-packages.steamos.cloud/archlinux-mirror
   GH_TOKEN: ${{ github.token }}
   GH_REPO: ${{ github.repository }}
@@ -112,11 +113,16 @@ jobs:
           mkdir -p /tmp/rel
           gh release download "$TAG" -p SHA256SUMS -D /tmp/rel --clobber 2>/dev/null || touch /tmp/rel/SHA256SUMS
           gh release download "$TAG" -p index.txt -D /tmp/rel --clobber 2>/dev/null || touch /tmp/rel/index.txt
-          ( cd out && sha256sum xevmafix-"$K".ko xehdrfix-"$K".ko ) > /tmp/new.sums
+          gh release download "$TAG" -p not-needed.txt -D /tmp/rel --clobber 2>/dev/null || touch /tmp/rel/not-needed.txt
+          kos=$(cd out && ls -- *-"$K".ko)
+          ( cd out && sha256sum $kos ) > /tmp/new.sums
           grep -v -e " xevmafix-$K.ko\$" -e " xehdrfix-$K.ko\$" /tmp/rel/SHA256SUMS > /tmp/sums || true
           cat /tmp/new.sums >> /tmp/sums
           cp /tmp/sums out/SHA256SUMS
           grep -v "^$ver " /tmp/rel/index.txt > out/index.txt || true
           echo "$ver ${{ needs.find.outputs.src }} $K" >> out/index.txt
-          gh release upload "$TAG" --clobber out/xevmafix-"$K".ko out/xehdrfix-"$K".ko out/SHA256SUMS out/index.txt
-          cat /tmp/new.sums
+          # "<module> <kernel>": kernels whose xe driver has the fix itself, so the apply script does not look for that module
+          grep -v " $K\$" /tmp/rel/not-needed.txt > out/not-needed.txt || true
+          while read -r m; do if [ -n "$m" ]; then echo "$m $K"; fi; done < out/not-needed >> out/not-needed.txt
+          gh release upload "$TAG" --clobber $(for k in $kos; do echo "out/$k"; done) out/SHA256SUMS out/index.txt out/not-needed.txt
+          cat /tmp/new.sums out/not-needed.txt
